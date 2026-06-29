@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<title>TQQQ Tracker</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{background:#0b0e14;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Apple SD Gothic Neo',sans-serif;}
+  input{font-family:inherit;}
+  ::-webkit-scrollbar{display:none;}
+  button:active{transform:scale(0.98);}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const {useState,useEffect}=React;
+
+// ── 스위칭 테이블 (코드문서 기준)
+const SW=[
+  {min:1,  max:10,  alloc:{QQQ:2,JEPQ:2,JEPI:2,SCHD:4,O:0,"채권/BTC":0}},
+  {min:10, max:20,  alloc:{QQQ:2,JEPQ:1.5,JEPI:1,SCHD:4,O:1,"채권/BTC":0.5}},
+  {min:20, max:50,  alloc:{QQQ:2,JEPQ:1.5,JEPI:1,SCHD:3,O:1.5,"채권/BTC":1}},
+  {min:50, max:100, alloc:{QQQ:2,JEPQ:1,JEPI:0.5,SCHD:3.5,O:1.5,"채권/BTC":1.5}},
+  {min:100,max:200, alloc:{QQQ:2,JEPQ:0,JEPI:0,SCHD:5,O:1.5,"채권/BTC":1.5}},
+  {min:200,max:9999,alloc:{QQQ:2,JEPQ:0,JEPI:0,SCHD:4.5,O:1.5,"채권/BTC":2}},
+];
+function swUnit(bil){return 500*(Math.floor(bil/10)+1);}
+function getSW(bil){if(bil<1)return null;return SW.find(r=>bil>=r.min&&bil<r.max)||SW[SW.length-1];}
+
+const MS=[
+  {v:0.5,l:"스위칭 준비",d:"첫 분할 매도 준비 구간",i:"🌱"},
+  {v:1,l:"스위칭 시작",d:"배당 자산으로 분산 개시",i:"⚡"},
+  {v:3,l:"복리 가속",d:"눈덩이가 굴러가기 시작",i:"🚀"},
+  {v:5,l:"배당 파이프라인",d:"월 현금흐름 본격화",i:"💧"},
+  {v:10,l:"배우자 계좌 이전",d:"세금 최적화 분산",i:"👫"},
+  {v:20,l:"은퇴 가시권",d:"경제적 자유 사정권",i:"🎯"},
+  {v:45,l:"21년 목표",d:"메인 목표 달성",i:"🏆"},
+  {v:100,l:"커버드콜 종료",d:"순수 성장+배당 체제",i:"👑"},
+];
+const QUOTES=[
+  {t:"하락이 공포가 아닌 기회인 자만이 이 전략을 완성한다",a:"전략 원칙"},
+  {t:"시간이 곧 복리다. 시장에 머무는 것이 시장을 이기려는 것보다 낫다",a:"투자 격언"},
+  {t:"가장 좋은 보유 기간은 영원이다",a:"워런 버핏"},
+  {t:"부는 인내심 없는 자에게서 인내심 있는 자에게로 이동한다",a:"워런 버핏"},
+  {t:"변동성은 리스크가 아니다. 영구적 손실이 리스크다",a:"투자 격언"},
+  {t:"규칙의 단순함이 수십 년을 견디게 한다",a:"전략 원칙"},
+  {t:"시장 타이밍을 맞추려 하지 말고, 시장에 머무는 시간을 늘려라",a:"투자 격언"},
+  {t:"공포에 사고 탐욕에 팔아라. 군중의 반대편에 서라",a:"투자 격언"},
+  {t:"복리는 세계 8번째 불가사의다",a:"아인슈타인(전설)"},
+  {t:"드로다운은 적립의 기회다. 두려움이 진짜 리스크다",a:"전략 원칙"},
+];
+function todayQuote(){var d=new Date();var day=Math.floor((d-new Date(d.getFullYear(),0,0))/86400000);return QUOTES[day%QUOTES.length];}
+
+const C={bg:"#0b0e14",card:"#151a24",card2:"#1c2230",card3:"#252c3d",line:"#222a38",line2:"#2e3748",green:"#3ee6a0",blue:"#5b8cff",coral:"#ff5e6c",gold:"#ffc94d",orange:"#ff9d5c",purple:"#a78bff",t:"#f0f2f8",t2:"#aeb6c8",t3:"#6b7488"};
+const SK="tqqq_html_v1";
+const KK="tqqq_apikey";
+const BLANK={done:false,startDate:"2026-03-12",daily:50000,initShares:0,initCapital:0,ndxPeak:0,triggered:[],logs:[],news:null,newsDate:null,lastSaved:null};
+
+function won(w){if(w>=1e8)return(w/1e8).toFixed(2)+"억";if(w>=1e4)return Math.round(w/1e4).toLocaleString()+"만";return Math.round(w).toLocaleString();}
+function wonFull(w){return Math.round(w).toLocaleString();}
+function toDay(){var d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+
+// ── localStorage 영구저장
+function load(){try{var r=localStorage.getItem(SK);return r?JSON.parse(r):null;}catch(e){return null;}}
+function persist(s){try{localStorage.setItem(SK,JSON.stringify(s));return true;}catch(e){return false;}}
+function loadKey(){try{return localStorage.getItem(KK)||"";}catch(e){return "";}}
+function saveKey(k){try{localStorage.setItem(KK,k);}catch(e){}}
+
+function derive(s){
+  var logBuyShares=s.logs.reduce((a,l)=>a+(l.bought?(l.shares||0):0),0);
+  var totShares=(s.initShares||0)+logBuyShares;
+  var logBuyAmt=s.logs.reduce((a,l)=>a+(l.bought?(l.buyAmt||0):0),0);
+  var invested=(s.initCapital||0)+logBuyAmt;
+  var sorted=s.logs.slice().sort((a,b)=>b.date.localeCompare(a.date));
+  var last=sorted[0];
+  var price=last?last.price:0, fx=last?last.fx:1300, ndx=last?last.ndx:0;
+  var krw=totShares*price*fx, bil=krw/1e8, profit=krw-invested, roi=invested>0?(krw/invested-1)*100:0;
+  return {logBuyShares,totShares,invested,last,price,fx,ndx,krw,bil,profit,roi};
+}
+
+// ── 무료 시세 (Stooq, CORS 허용, 키 불필요)
+async function fetchStooq(){
+  var out={};
+  try{
+    // TQQQ
+    var r1=await fetch("https://stooq.com/q/l/?s=tqqq.us&f=sd2t2ohlcv&h&e=csv");
+    var t1=await r1.text();
+    var rows1=t1.trim().split("\n");
+    if(rows1[1]){var c1=rows1[1].split(",");var close1=parseFloat(c1[6]);if(close1>0)out.price=close1;}
+  }catch(e){}
+  try{
+    // NDX
+    var r2=await fetch("https://stooq.com/q/l/?s=^ndx&f=sd2t2ohlcv&h&e=csv");
+    var t2=await r2.text();
+    var rows2=t2.trim().split("\n");
+    if(rows2[1]){var c2=rows2[1].split(",");var close2=parseFloat(c2[6]);if(close2>0)out.ndx=close2;}
+  }catch(e){}
+  try{
+    // USD/KRW
+    var r3=await fetch("https://stooq.com/q/l/?s=usdkrw&f=sd2t2ohlcv&h&e=csv");
+    var t3=await r3.text();
+    var rows3=t3.trim().split("\n");
+    if(rows3[1]){var c3=rows3[1].split(",");var close3=parseFloat(c3[6]);if(close3>0)out.fx=close3;}
+  }catch(e){}
+  return out;
+}
+
+// ── Anthropic API (키 있을 때, 시세+고점+뉴스)
+async function fetchAnthropic(key,wantNews){
+  var content = wantNews
+    ? "오늘 미국 증시를 검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율 (5)오늘 핵심뉴스 3개(시황/빅테크/거시 섞어서 각 한문장). JSON만 출력: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num,\"news\":[{\"cat\":\"시황|빅테크|거시\",\"text\":\"...\"}]}"
+    : "검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율. JSON만: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num}";
+  var res=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-3-5-sonnet-20241022",max_tokens:700,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:content}]})
+  });
+  var d=await res.json();
+  if(d.error)throw new Error(d.error.message||"API 오류");
+  var txt="";var blocks=d.content||[];
+  for(var i=0;i<blocks.length;i++){if(blocks[i].type==="text")txt+=blocks[i].text;}
+  var m=txt.match(/\{[\s\S]*\}/);
+  if(!m)throw new Error("응답 파싱 실패");
+  return JSON.parse(m[0]);
+}
+
+// ── UI
+var inpStyle={background:C.card2,border:"1px solid "+C.line2,borderRadius:14,padding:"15px 16px",color:C.t,fontFamily:"monospace",fontSize:17,width:"100%",outline:"none",boxSizing:"border-box",WebkitAppearance:"none",fontWeight:600};
+function TInput(p){return(<div>{p.label?<div style={{fontSize:12,color:C.t3,marginBottom:8,fontWeight:500}}>{p.label}</div>:null}<input type={p.type||"text"} inputMode={p.type==="password"?"text":"decimal"} value={p.value} onChange={p.onChange} placeholder={p.placeholder||""} style={inpStyle}/></div>);}
+function Btn(p){var bg=p.disabled?C.card3:p.bg;return(<button onClick={p.onClick} disabled={!!p.disabled} style={{width:"100%",background:bg,color:p.disabled?C.t3:(p.fg||"#0b0e14"),border:"none",borderRadius:16,padding:p.small?"13px 0":"17px 0",fontWeight:700,fontSize:p.small?14:16,cursor:p.disabled?"default":"pointer",letterSpacing:"-0.01em",boxShadow:p.disabled?"none":"0 2px 12px rgba(0,0,0,.25)"}}>{p.label}</button>);}
+function Card(p){return(<div style={{background:C.card,borderRadius:22,padding:p.pad||20,marginBottom:14,boxShadow:"0 1px 3px rgba(0,0,0,.3)",border:"1px solid "+C.line}}>{p.children}</div>);}
+function Label(p){return <div style={{fontSize:13,color:C.t3,fontWeight:600,marginBottom:p.mb!=null?p.mb:16}}>{p.children}</div>;}
+
+// ═══════ 홈 ═══════
+function HomeTab(p){
+  var s=p.s,onSave=p.onSave,onToast=p.onToast,apiKey=p.apiKey;
+  var [price,setPrice]=useState("");
+  var [ndx,setNdx]=useState("");
+  var [fx,setFx]=useState("1300");
+  var [msg,setMsg]=useState("");
+  var [busy,setBusy]=useState(false);
+  var [newsBusy,setNewsBusy]=useState(false);
+
+  var td=toDay();
+  var todayLog=s.logs.find(l=>l.date===td);
+  var D=derive(s);
+  var dday=Math.floor((new Date()-new Date(s.startDate))/86400000);
+  var boughtDays=s.logs.filter(l=>l.bought).length;
+  var streak=(()=>{var so=s.logs.slice().sort((a,b)=>b.date.localeCompare(a.date));var n=0;for(var i=0;i<so.length;i++){if(so[i].bought)n++;else break;}return n;})();
+  var peak=s.ndxPeak||0;
+  var curNdx=todayLog?todayLog.ndx:D.ndx;
+  var mddPct=peak>0&&curNdx>0?(curNdx-peak)/peak*100:0;
+  var mddAbs=Math.abs(mddPct);
+  var daily=s.daily||50000;
+  var extra=0;
+  if(mddPct<=-50)extra=200000;else if(mddPct<=-40)extra=150000;else if(mddPct<=-30)extra=100000;else if(mddPct<=-20)extra=50000;
+  var buyAmt=daily+extra;
+  var swRow=getSW(D.bil);
+  var nextBil=Math.floor(D.bil)+1;
+  var remain=(nextBil-D.bil)*1e8;
+  var useP=todayLog?todayLog.price:parseFloat(price);
+  var useF=todayLog?todayLog.fx:(parseFloat(fx)||1300);
+  var buyShares=(useP>0&&useF>0)?buyAmt/(useP*useF):0;
+  var quote=todayQuote();
+
+  async function fetchPrice(){
+    setBusy(true);setMsg(apiKey?"AI 시세 조회 중...":"무료 시세 조회 중...");
+    try{
+      var data;
+      if(apiKey){
+        data=await fetchAnthropic(apiKey,false);
+      }else{
+        data=await fetchStooq();
+        if(!data.price&&!data.ndx)throw new Error("무료 시세 실패 - 직접 입력");
+      }
+      if(data.price>0)setPrice(String(Number(data.price).toFixed(2)));
+      if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
+      if(data.fx>0)setFx(String(Math.round(data.fx)));
+      if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
+        await onSave(Object.assign({},s,{ndxPeak:Math.round(data.ndxPeak)}));
+        setMsg("✓ 완료 · NDX고점 "+Math.round(data.ndxPeak).toLocaleString());
+      }else setMsg("✓ 시세 조회 완료"+(apiKey?"":" (무료/고점 수동입력)"));
+    }catch(e){setMsg(e.message);}
+    setBusy(false);
+  }
+
+  async function fetchNews(){
+    if(!apiKey){onToast("뉴스는 API키가 필요해요");return;}
+    setNewsBusy(true);
+    try{
+      var data=await fetchAnthropic(apiKey,true);
+      if(data.price>0)setPrice(String(Number(data.price).toFixed(2)));
+      if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
+      if(data.fx>0)setFx(String(Math.round(data.fx)));
+      var patch={news:data.news||null,newsDate:td};
+      if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0))patch.ndxPeak=Math.round(data.ndxPeak);
+      await onSave(Object.assign({},s,patch));
+    }catch(e){onToast(e.message);}
+    setNewsBusy(false);
+  }
+
+  async function saveClose(){
+    var p2=parseFloat(price),n2=parseFloat(ndx),f2=parseFloat(fx)||1300;
+    if(!p2||!n2){onToast("종가와 NDX를 입력해주세요");return;}
+    var ns=Object.assign({},s,{logs:s.logs.slice()});
+    if(n2>(ns.ndxPeak||0))ns.ndxPeak=n2;
+    var idx=ns.logs.findIndex(l=>l.date===td);
+    if(idx>=0)ns.logs[idx]=Object.assign({},ns.logs[idx],{price:p2,ndx:n2,fx:f2});
+    else ns.logs.push({date:td,price:p2,ndx:n2,fx:f2,shares:0,buyAmt:0,extra:0,bought:false,swFired:null});
+    await onSave(ns);onToast("종가 저장됨");
+  }
+  async function doBuy(){
+    if(!todayLog){onToast("먼저 종가를 저장해주세요");return;}
+    if(todayLog.bought){onToast("이미 매수 완료");return;}
+    var p2=todayLog.price,n2=todayLog.ndx,f2=todayLog.fx;
+    var ns=Object.assign({},s,{logs:s.logs.slice(),triggered:(s.triggered||[]).slice()});
+    var peak2=ns.ndxPeak||n2;var mdd2=(n2-peak2)/peak2*100;var ex2=0;
+    if(mdd2<=-50)ex2=200000;else if(mdd2<=-40)ex2=150000;else if(mdd2<=-30)ex2=100000;else if(mdd2<=-20)ex2=50000;
+    var ba2=daily+ex2;var sh2=ba2/(p2*f2);
+    var D2=derive(s);var newBil=(D2.totShares+sh2)*p2*f2/1e8;var swFired=null;
+    for(var t=1;t<=Math.floor(newBil);t++){if(ns.triggered.indexOf(t)===-1){ns.triggered.push(t);swFired=t;}}
+    var idx=ns.logs.findIndex(l=>l.date===td);
+    ns.logs[idx]=Object.assign({},ns.logs[idx],{shares:sh2,buyAmt:ba2,extra:ex2,bought:true,swFired:swFired});
+    await onSave(ns);onToast("매수 완료 · +"+sh2.toFixed(4)+"주");
+  }
+  async function cancelBuy(){
+    if(!todayLog||!todayLog.bought)return;
+    var ns=Object.assign({},s,{logs:s.logs.map(l=>l.date===td?Object.assign({},l,{shares:0,buyAmt:0,extra:0,bought:false,swFired:null}):l)});
+    await onSave(ns);onToast("매수 취소됨");
+  }
+
+  var news=s.news&&s.newsDate===td?s.news:null;
+  var catColor={"시황":C.green,"빅테크":C.blue,"거시":C.gold};
+
+  return (
+    <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
+      <div style={{padding:"18px 4px 10px"}}>
+        <div style={{fontSize:17,fontWeight:600,color:C.t,lineHeight:1.5}}>"{quote.t}"</div>
+        <div style={{fontSize:13,color:C.t3,marginTop:8}}>— {quote.a}</div>
+      </div>
+
+      <div style={{background:"linear-gradient(160deg,"+C.card3+" 0%,"+C.card+" 60%)",borderRadius:26,padding:"26px 22px",marginBottom:14,position:"relative",overflow:"hidden",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
+        <div style={{position:"absolute",top:-40,right:-40,width:160,height:160,borderRadius:"50%",background:"radial-gradient(circle,"+C.green+"22,transparent 70%)"}}/>
+        <div style={{fontSize:13,color:C.t2,marginBottom:8,fontWeight:500,position:"relative"}}>총 자산 평가액</div>
+        <div style={{display:"flex",alignItems:"baseline",gap:6,position:"relative"}}>
+          <div style={{fontFamily:"monospace",fontSize:42,fontWeight:800,color:C.t,lineHeight:1}}>{won(D.krw)}</div>
+          <div style={{fontSize:20,color:C.t2,fontWeight:600}}>원</div>
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:14,position:"relative"}}>
+          <div style={{background:D.profit>=0?"rgba(62,230,160,.15)":"rgba(255,94,108,.15)",color:D.profit>=0?C.green:C.coral,padding:"6px 12px",borderRadius:10,fontSize:14,fontWeight:700,fontFamily:"monospace"}}>
+            {D.profit>=0?"▲":"▼"} {won(Math.abs(D.profit))}원 ({D.roi>=0?"+":""}{D.roi.toFixed(1)}%)
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginTop:20,position:"relative"}}>
+          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>{won(D.invested)}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>투입원금</div></div>
+          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.blue}}>{D.invested>0?(D.krw/D.invested).toFixed(2)+"x":"—"}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>수익배수</div></div>
+          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>{D.totShares.toFixed(1)}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>보유주식</div></div>
+        </div>
+      </div>
+
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:news?16:0}}>
+          <Label mb={0}>📰 오늘의 시장 브리핑</Label>
+          <button onClick={fetchNews} disabled={newsBusy} style={{background:"none",border:"none",color:apiKey?C.blue:C.t3,fontSize:13,fontWeight:600,cursor:"pointer"}}>{newsBusy?"불러오는 중…":news?"새로고침":(apiKey?"불러오기":"API키 필요")}</button>
+        </div>
+        {news?news.map((item,i)=>(
+          <div key={i} style={{display:"flex",gap:12,padding:"12px 0",borderTop:i>0?"1px solid "+C.line:"none"}}>
+            <div style={{flexShrink:0,fontSize:11,fontWeight:700,color:catColor[item.cat]||C.t2,background:(catColor[item.cat]||C.t2)+"1a",padding:"4px 9px",borderRadius:8,height:"fit-content"}}>{item.cat}</div>
+            <div style={{fontSize:14,color:C.t,lineHeight:1.5}}>{item.text}</div>
+          </div>
+        )):(<div style={{textAlign:"center",padding:"16px 0",color:C.t3,fontSize:13,lineHeight:1.6}}>나스닥 시황 · 빅테크 · 거시경제<br/>핵심 뉴스 요약 (API키 설정 시)</div>)}
+      </Card>
+
+      <Card>
+        <Label>오늘 종가 입력</Label>
+        <div style={{marginBottom:msg?10:14}}>
+          <Btn label={busy?"⏳ 조회 중…":(apiKey?"⚡ AI 시세+고점 자동조회":"⚡ 무료 시세 조회 (Stooq)")} bg={C.card3} fg={C.blue} onClick={fetchPrice} disabled={busy} small/>
+        </div>
+        {msg?<div style={{fontSize:12,color:msg.startsWith("✓")?C.green:C.gold,textAlign:"center",marginBottom:14,fontFamily:"monospace"}}>{msg}</div>:null}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <TInput label="TQQQ ($)" value={price} onChange={e=>setPrice(e.target.value)} placeholder="0.00"/>
+          <TInput label="NDX 지수" value={ndx} onChange={e=>setNdx(e.target.value)} placeholder="20000"/>
+        </div>
+        <div style={{marginBottom:14}}><TInput label="USD/KRW 환율" value={fx} onChange={e=>setFx(e.target.value)} placeholder="1300"/></div>
+        <Btn label="종가 저장" bg={C.blue} fg="#fff" onClick={saveClose}/>
+      </Card>
+
+      <Card>
+        <Label>오늘 매수</Label>
+        {!todayLog?(<div style={{textAlign:"center",padding:"20px 0",color:C.t3,fontSize:14}}>먼저 종가를 저장해주세요</div>):(
+          <div>
+            <div style={{background:C.card2,borderRadius:16,padding:16,marginBottom:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <span style={{fontSize:13,color:C.t2}}>매수 금액</span>
+                <span style={{fontFamily:"monospace",fontSize:17,fontWeight:700,color:extra>0?C.coral:C.green}}>{wonFull(buyAmt)}원</span>
+              </div>
+              {extra>0?<div style={{fontSize:12,color:C.coral,textAlign:"right",marginBottom:10}}>기본 {won(daily)} + MDD추가 {won(extra)}</div>:null}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:13,color:C.t2}}>예상 수량</span>
+                <span style={{fontFamily:"monospace",fontSize:17,fontWeight:700,color:C.t}}>+{buyShares.toFixed(4)}주</span>
+              </div>
+            </div>
+            {todayLog.bought?(
+              <div>
+                <div style={{background:"rgba(62,230,160,.1)",borderRadius:14,padding:"14px",textAlign:"center",marginBottom:10}}><span style={{color:C.green,fontWeight:700,fontSize:15}}>✓ 매수 완료 · +{(todayLog.shares||0).toFixed(4)}주</span></div>
+                <Btn label="매수 취소" bg={C.card3} fg={C.coral} onClick={cancelBuy} small/>
+              </div>
+            ):(<Btn label="매수하기" bg={C.green} fg="#0b0e14" onClick={doBuy}/>)}
+          </div>
+        )}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginTop:14}}>
+          {[[streak,"연속 매수"],[boughtDays,"총 매수일"],["D+"+dday,"투자 기간"]].map((it,i)=>(
+            <div key={i} style={{background:C.card2,borderRadius:14,padding:"14px 8px",textAlign:"center"}}>
+              <div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.green}}>{it[0]}</div>
+              <div style={{fontSize:11,color:C.t3,marginTop:3}}>{it[1]}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>NDX 하락 단계 · 추가매수</Label>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16}}>
+          <div>
+            <div style={{fontSize:11,color:C.t3,marginBottom:4}}>{peak>0?"고점 "+peak.toLocaleString()+"pt 대비":"고점 미설정"}</div>
+            <div style={{fontFamily:"monospace",fontSize:30,fontWeight:800,color:mddPct<=-20?C.coral:peak>0?C.t:C.t3}}>{peak>0&&curNdx>0?mddPct.toFixed(1)+"%":"—"}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:11,color:C.t3,marginBottom:4}}>현재 매수 단계</div>
+            <div style={{fontFamily:"monospace",fontSize:20,fontWeight:700,color:extra>0?C.coral:C.green}}>{won(buyAmt)}원</div>
+          </div>
+        </div>
+        {peak>0?(
+          <div>
+            <div style={{height:8,background:C.card2,borderRadius:4,overflow:"hidden",marginBottom:14}}>
+              <div style={{height:"100%",width:Math.min(mddAbs/50*100,100)+"%",background:mddAbs>=50?"#ff3344":mddAbs>=40?C.coral:mddAbs>=30?C.gold:C.orange,borderRadius:4}}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              {[["기본","5만",0],["-20%","10만",20],["-30%","15만",30],["-40%","20만",40],["-50%","25만",50]].map(it=>{
+                var on=mddAbs>=it[2]&&it[2]>0;
+                return(<div key={it[0]} style={{textAlign:"center",flex:1}}>
+                  <div style={{width:10,height:10,borderRadius:"50%",border:"2px solid "+(on?C.coral:C.line2),background:on?C.coral:"transparent",margin:"0 auto 6px"}}/>
+                  <div style={{fontSize:10,color:C.t3}}>{it[0]}</div>
+                  <div style={{fontSize:11,color:on?C.coral:C.t2,fontWeight:600,marginTop:1}}>{it[1]}</div>
+                </div>);
+              })}
+            </div>
+          </div>
+        ):(<div style={{fontSize:13,color:C.t3,textAlign:"center",padding:"10px 0"}}>시세 조회하면 고점이 자동 설정돼요</div>)}
+      </Card>
+
+      {D.bil>=0.5&&remain<5e7&&swRow?(
+        <div style={{background:"linear-gradient(135deg,rgba(91,140,255,.12),rgba(91,140,255,.04))",border:"1px solid rgba(91,140,255,.3)",borderRadius:20,padding:18,marginBottom:14}}>
+          <div style={{fontSize:13,fontWeight:700,color:C.blue,marginBottom:6}}>📍 스위칭 임박</div>
+          <div style={{fontSize:16,color:C.t}}>{nextBil}억까지 <strong style={{color:C.blue}}>{won(remain)}원</strong> 남았어요</div>
+        </div>
+      ):null}
+      {todayLog&&todayLog.swFired&&swRow?(
+        <div style={{background:"linear-gradient(135deg,rgba(255,201,77,.12),rgba(255,201,77,.04))",border:"1px solid rgba(255,201,77,.35)",borderRadius:20,padding:18,marginBottom:14}}>
+          <div style={{fontSize:14,fontWeight:700,color:C.gold,marginBottom:12}}>⚡ 스위칭 발동! {todayLog.swFired}억 돌파 · 매도 {swUnit(D.bil).toLocaleString()}만원</div>
+          {Object.keys(swRow.alloc).filter(k=>swRow.alloc[k]>0).map(a=>{
+            var w=swRow.alloc[a];var tw=Object.values(swRow.alloc).reduce((x,y)=>x+y,0);
+            return(<div key={a} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid "+C.line}}>
+              <span style={{fontFamily:"monospace",fontSize:13,color:C.gold}}>{a}</span>
+              <span style={{fontFamily:"monospace",fontSize:12,color:C.t2}}>{w}/{tw} · {Math.round(swUnit(D.bil)*10000*w/tw/10000).toLocaleString()}만원</span>
+            </div>);
+          })}
+        </div>
+      ):null}
+    </div>
+  );
+}
+
+// ═══════ 기록 ═══════
+function LogTab(p){
+  var s=p.s;var D=derive(s);var cum=s.initShares||0;
+  var rows=s.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(l=>{if(l.bought)cum+=(l.shares||0);return Object.assign({},l,{cum:cum});}).reverse();
+  return (
+    <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
+      <div style={{padding:"18px 4px 14px"}}>
+        <div style={{fontSize:24,fontWeight:800,color:C.t}}>매수 기록</div>
+        <div style={{fontFamily:"monospace",fontSize:13,color:C.t3,marginTop:6}}>초기 {(s.initShares||0).toFixed(2)} + 매수 {D.logBuyShares.toFixed(2)} = 총 {D.totShares.toFixed(2)}주</div>
+      </div>
+      {rows.length===0?(<Card><div style={{textAlign:"center",padding:"30px 0",color:C.t3}}>아직 기록이 없어요</div></Card>):rows.slice(0,80).map(l=>{
+        var peak=s.ndxPeak||0;var ndxM=peak>0?(l.ndx-peak)/peak*100:0;
+        return(<div key={l.date} style={{display:"flex",alignItems:"center",gap:14,padding:"16px 18px",background:C.card,borderRadius:18,marginBottom:10,border:"1px solid "+C.line,opacity:l.bought?1:0.6}}>
+          <div style={{textAlign:"center",minWidth:42}}>
+            <div style={{fontFamily:"monospace",fontSize:16,fontWeight:700,color:C.t}}>{l.date.slice(8,10)}</div>
+            <div style={{fontSize:10,color:C.t3}}>{l.date.slice(5,7)}월</div>
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>${l.price?l.price.toFixed(2):"-"} {l.bought?<span style={{color:C.green}}>+{(l.shares||0).toFixed(3)}주</span>:<span style={{color:C.t3,fontSize:12,fontWeight:400}}>종가만 기록</span>}</div>
+            <div style={{fontSize:12,color:ndxM<=-20?C.coral:C.t3,marginTop:3}}>{l.bought?"누적 "+l.cum.toFixed(2)+"주 · "+won(l.cum*l.price*l.fx)+"원":"미매수"}{peak>0?" · NDX "+ndxM.toFixed(1)+"%":""}</div>
+          </div>
+          {l.extra>0?<div style={{fontSize:10,fontWeight:700,color:C.coral,background:"rgba(255,94,108,.12)",padding:"4px 8px",borderRadius:8}}>MDD</div>:null}
+        </div>);
+      })}
+    </div>
+  );
+}
+
+// ═══════ 목표 ═══════
+function GoalTab(p){
+  var s=p.s;var D=derive(s);var bil=D.bil;var swRow=getSW(bil);
+  var goalPct=Math.min(bil/45*100,100);var next=MS.find(m=>m.v>bil);
+  var nextIdx=MS.indexOf(next);var prevV=nextIdx>0?MS[nextIdx-1].v:0;
+  var segPct=next?Math.min((bil-prevV)/(next.v-prevV)*100,100):100;
+  return (
+    <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
+      <div style={{padding:"18px 4px 14px"}}>
+        <div style={{fontSize:24,fontWeight:800,color:C.t}}>목표 여정</div>
+        <div style={{fontSize:13,color:C.t3,marginTop:6}}>21년, 45억을 향한 길</div>
+      </div>
+      <div style={{background:"linear-gradient(160deg,"+C.card3+","+C.card+")",borderRadius:26,padding:"28px 22px",marginBottom:14,textAlign:"center",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
+        <div style={{fontSize:13,color:C.t2,marginBottom:10}}>45억 목표까지</div>
+        <div style={{fontFamily:"monospace",fontSize:48,fontWeight:800,color:C.green,lineHeight:1}}>{goalPct.toFixed(1)}<span style={{fontSize:26}}>%</span></div>
+        <div style={{height:10,background:C.card2,borderRadius:5,overflow:"hidden",margin:"20px 0 8px"}}>
+          <div style={{height:"100%",width:goalPct+"%",background:"linear-gradient(90deg,"+C.blue+","+C.green+")",borderRadius:5,boxShadow:"0 0 12px "+C.green+"66"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.t3}}><span>현재 {won(D.krw)}원</span><span>목표 45억</span></div>
+      </div>
+      {next?(
+        <Card>
+          <Label mb={14}>다음 관문</Label>
+          <div style={{display:"flex",alignItems:"center",gap:16}}>
+            <div style={{fontSize:38}}>{next.i}</div>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                <span style={{fontFamily:"monospace",fontSize:22,fontWeight:800,color:C.t}}>{next.v>=1?next.v+"억":(next.v*10)+"천만"}</span>
+                <span style={{fontSize:14,color:C.blue,fontWeight:600}}>{next.l}</span>
+              </div>
+              <div style={{fontSize:13,color:C.t3,marginTop:2}}>{next.d}</div>
+              <div style={{height:6,background:C.card2,borderRadius:3,overflow:"hidden",marginTop:10}}><div style={{height:"100%",width:segPct+"%",background:C.blue,borderRadius:3}}/></div>
+              <div style={{fontSize:12,color:C.t3,marginTop:6,fontFamily:"monospace"}}>{won((next.v-bil)*1e8)}원 남음 · {segPct.toFixed(0)}% 진행</div>
+            </div>
+          </div>
+        </Card>
+      ):null}
+      <Card>
+        <Label mb={6}>마일스톤 여정</Label>
+        <div style={{position:"relative",paddingLeft:8}}>
+          {MS.map((m,i)=>{
+            var done=bil>=m.v;var isNext=m===next;var lastItem=i===MS.length-1;
+            return(<div key={m.v} style={{display:"flex",gap:14,position:"relative",paddingBottom:lastItem?0:18}}>
+              {!lastItem?<div style={{position:"absolute",left:13,top:28,bottom:0,width:2,background:done?C.green:C.line2}}/>:null}
+              <div style={{width:28,height:28,borderRadius:"50%",background:done?C.green:isNext?C.card3:C.card2,border:"2px solid "+(done?C.green:isNext?C.blue:C.line2),display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,zIndex:1,fontSize:13}}>{done?"✓":m.i}</div>
+              <div style={{flex:1,paddingTop:2}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontFamily:"monospace",fontSize:16,fontWeight:700,color:done?C.green:isNext?C.t:C.t3}}>{m.v>=1?m.v+"억":(m.v*10)+"천만"}</span>
+                  <span style={{fontSize:13,color:done?C.t2:isNext?C.blue:C.t3,fontWeight:isNext?600:400}}>{m.l}</span>
+                  {isNext?<span style={{fontSize:10,fontWeight:700,color:C.blue,background:"rgba(91,140,255,.15)",padding:"3px 8px",borderRadius:8}}>NOW</span>:null}
+                </div>
+                <div style={{fontSize:12,color:C.t3,marginTop:2}}>{m.d}</div>
+              </div>
+            </div>);
+          })}
+        </div>
+      </Card>
+      <Card>
+        <Label>스위칭 전략</Label>
+        {swRow?(
+          <div style={{background:C.card2,borderRadius:16,padding:16,marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{fontSize:13,color:C.t2}}>{swRow.min}억~{swRow.max===9999?"∞":swRow.max+"억"} 구간</span>
+              <span style={{fontFamily:"monospace",fontSize:16,fontWeight:700,color:C.gold}}>매도 {swUnit(bil).toLocaleString()}만원</span>
+            </div>
+            {Object.keys(swRow.alloc).filter(k=>swRow.alloc[k]>0).map(a=>{
+              var w=swRow.alloc[a];var tw=Object.values(swRow.alloc).reduce((x,y)=>x+y,0);
+              return(<div key={a} style={{marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:13,color:C.t}}>{a}</span><span style={{fontFamily:"monospace",fontSize:12,color:C.t3}}>{Math.round(swUnit(bil)*10000*w/tw/10000).toLocaleString()}만원</span></div>
+                <div style={{height:5,background:C.card3,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:(w/tw*100)+"%",background:C.blue,borderRadius:3}}/></div>
+              </div>);
+            })}
+          </div>
+        ):(<div style={{background:C.card2,borderRadius:16,padding:20,textAlign:"center",color:C.t3,fontSize:13,marginBottom:14}}>1억 달성 시 스위칭이 시작돼요</div>)}
+        <div style={{overflowX:"auto",marginLeft:-4,marginRight:-4}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace",fontSize:10}}>
+            <thead><tr>{["구간","단위","QQQ","JEPQ","JEPI","SCHD","O","채권"].map(h=><th key={h} style={{padding:"6px 3px",textAlign:"center",borderBottom:"1px solid "+C.line2,color:C.t3,fontWeight:500,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+            <tbody>{SW.map((row,i)=>{
+              var active=bil>=row.min&&bil<row.max;
+              return(<tr key={i} style={{background:active?"rgba(91,140,255,.12)":"transparent"}}>
+                <td style={{padding:"7px 3px",textAlign:"center",color:active?C.blue:C.t3,fontWeight:active?700:400,whiteSpace:"nowrap"}}>{row.min}~{row.max===9999?"∞":row.max}</td>
+                <td style={{padding:"7px 3px",textAlign:"center",color:C.gold}}>{swUnit(row.min)}</td>
+                {["QQQ","JEPQ","JEPI","SCHD","O","채권/BTC"].map(k=>{var v=row.alloc[k]||0;return <td key={k} style={{padding:"7px 3px",textAlign:"center",color:v>0?C.t:C.line2}}>{v||"·"}</td>;})}
+              </tr>);
+            })}</tbody>
+          </table>
+        </div>
+        <div style={{fontFamily:"monospace",fontSize:12,color:C.t3,marginTop:12}}>발동 이력: {s.triggered&&s.triggered.length?s.triggered.slice().sort((a,b)=>a-b).map(t=>t+"억").join(" · "):"아직 없음"}</div>
+      </Card>
+    </div>
+  );
+}
+
+// ═══════ 설정 ═══════
+function CfgTab(p){
+  var s=p.s,onSave=p.onSave,onToast=p.onToast,onReset=p.onReset,apiKey=p.apiKey,setApiKey=p.setApiKey;
+  var D=derive(s);
+  var [daily,setDaily]=useState(String(s.daily||50000));
+  var [initShares,setInitShares]=useState(String(s.initShares||0));
+  var [initCapital,setInitCapital]=useState(String(s.initCapital||0));
+  var [triggered,setTriggered]=useState((s.triggered||[]).join(","));
+  var [keyInput,setKeyInput]=useState(apiKey);
+  useEffect(function(){
+    setDaily(String(s.daily||50000));setInitShares(String(s.initShares||0));
+    setInitCapital(String(s.initCapital||0));setTriggered((s.triggered||[]).join(","));
+  },[s.daily,s.initShares,s.initCapital,s.triggered]);
+
+  async function doSave(){
+    await onSave(Object.assign({},s,{daily:parseInt(daily)||50000,initShares:parseFloat(initShares)||0,initCapital:parseFloat(initCapital)||0,triggered:triggered?triggered.split(",").map(x=>parseInt(x.trim())).filter(n=>!isNaN(n)):[]}));
+    onToast("설정이 저장됐어요");
+  }
+  function doSaveKey(){setApiKey(keyInput);saveKey(keyInput);onToast(keyInput?"API키 저장됨":"API키 삭제됨");}
+
+  return (
+    <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
+      <div style={{padding:"18px 4px 14px"}}><div style={{fontSize:24,fontWeight:800,color:C.t}}>설정</div></div>
+
+      <Card>
+        <Label>🔑 Anthropic API 키</Label>
+        <div style={{fontSize:12,color:C.t3,lineHeight:1.7,marginBottom:14}}>
+          키를 넣으면 AI가 실시간 시세+NDX고점+뉴스를 자동 조회해요.<br/>
+          비워두면 무료 시세(Stooq)로 가격만 조회됩니다.<br/>
+          <span style={{color:C.t2}}>키는 이 기기에만 저장되고 외부로 안 나가요.</span>
+        </div>
+        <div style={{marginBottom:12}}>
+          <TInput label="sk-ant-..." type="password" value={keyInput} onChange={e=>setKeyInput(e.target.value)} placeholder="API 키 붙여넣기"/>
+        </div>
+        <Btn label={apiKey?"API키 업데이트":"API키 저장"} bg={C.card3} fg={C.blue} onClick={doSaveKey} small/>
+        <div style={{fontSize:12,color:apiKey?C.green:C.t3,marginTop:10,fontFamily:"monospace",textAlign:"center"}}>{apiKey?"✓ API키 설정됨 (풀기능)":"무료 모드 (시세만)"}</div>
+      </Card>
+
+      <Card>
+        <div style={{background:"rgba(62,230,160,.06)",borderRadius:14,padding:"14px 16px",marginBottom:18,fontSize:12,color:C.t2,lineHeight:1.8}}>
+          <b style={{color:C.green}}>초기 보유수량</b> · 앱 사용 전 가진 주식 수<br/>
+          <b style={{color:C.green}}>초기 투입원금</b> · 지금까지 넣은 총 금액(원)<br/>
+          <b style={{color:C.green}}>NDX 고점</b> · 현재 {s.ndxPeak?s.ndxPeak.toLocaleString()+"pt":"미설정"}
+        </div>
+        <div style={{marginBottom:14}}><TInput label="일일 매수금액 (원)" value={daily} onChange={e=>setDaily(e.target.value)} placeholder="50000"/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <TInput label="초기 보유수량 (주)" value={initShares} onChange={e=>setInitShares(e.target.value)} placeholder="382.5"/>
+          <TInput label="초기 투입원금 (원)" value={initCapital} onChange={e=>setInitCapital(e.target.value)} placeholder="5300000"/>
+        </div>
+        <div style={{marginBottom:16}}><TInput label="발동된 스위칭 (쉼표, 예: 1,2)" value={triggered} onChange={e=>setTriggered(e.target.value)} placeholder="없으면 공백"/></div>
+        <div style={{background:C.card2,borderRadius:16,padding:16,marginBottom:16,fontFamily:"monospace",fontSize:13,color:C.t2,lineHeight:1.9}}>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span>총 보유</span><span style={{color:C.green}}>{D.totShares.toFixed(3)}주</span></div>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span>총 투입원금</span><span style={{color:C.green}}>{won(D.invested)}원</span></div>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span>평가액</span><span style={{color:C.green}}>{won(D.krw)}원</span></div>
+        </div>
+        <Btn label="설정 저장" bg={C.blue} fg="#fff" onClick={doSave}/>
+      </Card>
+
+      <Card>
+        <Label mb={12}>데이터 관리</Label>
+        <div style={{background:C.card2,borderRadius:14,padding:"12px 16px",marginBottom:14,fontSize:12,color:C.t2,fontFamily:"monospace",lineHeight:1.7}}>
+          마지막 저장: <span style={{color:s.lastSaved?C.green:C.coral}}>{s.lastSaved?new Date(s.lastSaved).toLocaleString("ko-KR"):"없음"}</span><br/>
+          기록 수: <span style={{color:C.t}}>{s.logs.length}건</span><br/>
+          저장 방식: <span style={{color:C.green}}>localStorage (영구)</span>
+        </div>
+        <Btn label="전체 초기화" bg={C.card3} fg={C.coral} onClick={onReset} small/>
+      </Card>
+    </div>
+  );
+}
+
+// ═══════ 온보딩 ═══════
+function Onboard(p){
+  var [daily,setDaily]=useState("50000");
+  var [initShares,setInitShares]=useState("");
+  var [initCapital,setInitCapital]=useState("");
+  function done(){p.onDone({startDate:"2026-03-12",daily:parseInt(daily)||50000,initShares:parseFloat(initShares)||0,initCapital:parseFloat(initCapital)||0});}
+  return (
+    <div style={{position:"fixed",inset:0,background:C.bg,zIndex:200,overflowY:"auto",padding:24}}>
+      <div style={{maxWidth:440,margin:"40px auto"}}>
+        <div style={{fontFamily:"monospace",fontSize:13,color:C.green,fontWeight:700,letterSpacing:2,marginBottom:12}}>TQQQ TRACKER</div>
+        <div style={{fontSize:28,fontWeight:800,color:C.t,lineHeight:1.3,marginBottom:12}}>21년의 여정을<br/>함께 시작해요</div>
+        <div style={{fontSize:14,color:C.t3,lineHeight:1.7,marginBottom:28}}>이미 투자 중이라면 현황을 입력해주세요. NDX 고점은 첫 시세 조회 때 자동 설정됩니다.</div>
+        <div style={{marginBottom:16}}><TInput label="일일 매수금액 (원)" value={daily} onChange={e=>setDaily(e.target.value)} placeholder="50000"/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:28}}>
+          <TInput label="현재 보유수량 (주)" value={initShares} onChange={e=>setInitShares(e.target.value)} placeholder="382.5"/>
+          <TInput label="투입원금 (원)" value={initCapital} onChange={e=>setInitCapital(e.target.value)} placeholder="5300000"/>
+        </div>
+        <Btn label="시작하기" bg={C.green} fg="#0b0e14" onClick={done}/>
+      </div>
+    </div>
+  );
+}
+
+// ═══════ App ═══════
+function App(){
+  var [s,setS]=useState(null);
+  var [tab,setTab]=useState("home");
+  var [toast,setToast]=useState("");
+  var [ready,setReady]=useState(false);
+  var [apiKey,setApiKey]=useState("");
+
+  useEffect(function(){
+    var d=load();setS(d||Object.assign({},BLANK));
+    setApiKey(loadKey());setReady(true);
+  },[]);
+
+  async function onSave(ns){
+    var withTime=Object.assign({},ns,{lastSaved:new Date().toISOString()});
+    setS(withTime);
+    var ok=persist(withTime);
+    if(!ok)onToast("⚠️ 저장 실패 - 저장공간 확인");
+  }
+  function onToast(m){setToast(m);setTimeout(()=>setToast(""),2000);}
+  function onReset(){try{localStorage.removeItem(SK);}catch(e){}setS(Object.assign({},BLANK));}
+
+  if(!ready)return <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.t3,fontFamily:"monospace"}}>로딩중…</div>;
+  if(!s.done)return <Onboard onDone={d=>{onSave(Object.assign({},BLANK,d,{done:true,logs:[]}));}}/>;
+
+  var TABS=[["home","홈"],["log","기록"],["goal","목표"],["cfg","설정"]];
+  var ICONS={home:"M3 10.5L12 3l9 7.5M5 9.5V20h14V9.5",log:"M4 6h16M4 12h16M4 18h10",goal:"M12 2a10 10 0 100 20 10 10 0 000-20zm0 5v5l3 3",cfg:"M12 8a4 4 0 100 8 4 4 0 000-8zm8 4l2-1-2-4-2 1a7 7 0 00-2-1V4h-4v2a7 7 0 00-2 1L8 6 6 10l2 1v2l-2 1 2 4 2-1a7 7 0 002 1v2h4v-2a7 7 0 002-1l2 1 2-4-2-1z"};
+
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",color:C.t,fontSize:14}}>
+      {toast?<div style={{position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",background:C.t,color:C.bg,fontWeight:700,fontSize:14,padding:"12px 22px",borderRadius:24,zIndex:999,whiteSpace:"nowrap",pointerEvents:"none",boxShadow:"0 8px 28px rgba(0,0,0,.5)"}}>{toast}</div>:null}
+      <div style={{display:tab==="home"?"block":"none"}}><HomeTab s={s} onSave={onSave} onToast={onToast} apiKey={apiKey}/></div>
+      <div style={{display:tab==="log"?"block":"none"}}><LogTab s={s}/></div>
+      <div style={{display:tab==="goal"?"block":"none"}}><GoalTab s={s}/></div>
+      <div style={{display:tab==="cfg"?"block":"none"}}><CfgTab s={s} onSave={onSave} onToast={onToast} onReset={onReset} apiKey={apiKey} setApiKey={setApiKey}/></div>
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"rgba(11,14,20,.92)",backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",borderTop:"1px solid "+C.line,display:"grid",gridTemplateColumns:"repeat(4,1fr)",padding:"10px 0 calc(10px + env(safe-area-inset-bottom))",zIndex:100}}>
+        {TABS.map(it=>{
+          var on=tab===it[0];
+          return(<div key={it[0]} onClick={()=>setTab(it[0])} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,cursor:"pointer"}}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={on?C.green:C.t3} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={ICONS[it[0]]}/></svg>
+            <div style={{fontSize:11,color:on?C.green:C.t3,fontWeight:on?700:500}}>{it[1]}</div>
+          </div>);
+        })}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
