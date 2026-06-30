@@ -21,9 +21,9 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script type="text/babel">
-const {useState,useEffect}=React;
+const {useState,useEffect,useRef}=React;
 
-// ── 스위칭 테이블 (코드문서 기준)
+// ── 스위칭 테이블
 const SW=[
   {min:1,  max:10,  alloc:{QQQ:2,JEPQ:2,JEPI:2,SCHD:4,O:0,"채권/BTC":0}},
   {min:10, max:20,  alloc:{QQQ:2,JEPQ:1.5,JEPI:1,SCHD:4,O:1,"채권/BTC":0.5}},
@@ -69,7 +69,6 @@ function won(w){if(w>=1e8)return(w/1e8).toFixed(2)+"억";if(w>=1e4)return Math.r
 function wonFull(w){return Math.round(w).toLocaleString();}
 function toDay(){var d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
 
-// ── localStorage 영구저장
 function load(){try{var r=localStorage.getItem(SK);return r?JSON.parse(r):null;}catch(e){return null;}}
 function persist(s){try{localStorage.setItem(SK,JSON.stringify(s));return true;}catch(e){return false;}}
 function loadKey(){try{return localStorage.getItem(KK)||"";}catch(e){return "";}}
@@ -86,82 +85,123 @@ function derive(s){
   var last=sorted[0];
   var price=last?last.price:0, fx=last?last.fx:1300, ndx=last?last.ndx:0;
   var krw=totShares*price*fx, bil=krw/1e8, profit=krw-invested, roi=invested>0?(krw/invested-1)*100:0;
-  return {logBuyShares,totShares,invested,last,price,fx,ndx,krw,bil,profit,roi};
+  var avgPriceKrw=totShares>0?invested/totShares:0;
+  var avgPriceUsd=avgPriceKrw>0&&fx>0?avgPriceKrw/fx:0;
+  return {logBuyShares,totShares,invested,last,price,fx,ndx,krw,bil,profit,roi,avgPriceKrw,avgPriceUsd};
 }
 
-// ── Finnhub (무료키, CORS 열림, 프록시 불필요)
-async function fetchFinnhub(key){
-  var out={};
-  try{
-    var r=await fetch("https://finnhub.io/api/v1/quote?symbol=TQQQ&token="+key);
-    var d=await r.json();
-    if(d.c>0)out.price=d.c; // current price
-  }catch(e){}
-  // 환율 (Finnhub forex)
-  try{
-    var r2=await fetch("https://finnhub.io/api/v1/quote?symbol=OANDA:USD_KRW&token="+key);
-    var d2=await r2.json();
-    if(d2.c>0)out.fx=d2.c;
-  }catch(e){}
-  return out;
+// ── 월별 집계
+function buildMonthly(s){
+  var sorted=s.logs.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  var cumShares=(s.initShares||0), cumInvested=(s.initCapital||0);
+  var months={};
+  for(var l of sorted){
+    var mon=l.date.slice(0,7);
+    if(!months[mon])months[mon]={mon,days:0,shares:0,amt:0,endKrw:0,endPrice:0,endFx:1300,endNdx:0};
+    if(l.bought){
+      months[mon].days++;months[mon].shares+=(l.shares||0);months[mon].amt+=(l.buyAmt||0);
+      cumShares+=(l.shares||0);cumInvested+=(l.buyAmt||0);
+    }
+    if(l.price>0){
+      months[mon].endKrw=cumShares*l.price*(l.fx||1300);
+      months[mon].endPrice=l.price;months[mon].endFx=l.fx||1300;months[mon].endNdx=l.ndx||0;
+    }
+  }
+  return Object.values(months).sort((a,b)=>b.mon.localeCompare(a.mon));
 }
 
-// ── Stooq (여러 프록시 시도, 키 불필요)
+// ── 목표 예측
+function predictGoal(s,D){
+  var target=45e8;
+  if(D.krw<=0||D.krw>=target)return null;
+  var monthly=buildMonthly(s).filter(m=>m.endKrw>0).reverse();
+  if(monthly.length<2)return null;
+  // 최근 3개월 CAGR 기반
+  var n=Math.min(3,monthly.length-1);
+  var base=monthly[monthly.length-1-n].endKrw;
+  var end=monthly[monthly.length-1].endKrw;
+  if(base<=0||end<=base)return null;
+  var mRate=Math.pow(end/base,1/n)-1;
+  if(mRate<=0)return null;
+  var mLeft=Math.log(target/D.krw)/Math.log(1+mRate);
+  if(!isFinite(mLeft)||mLeft>1200)return null;
+  var dt=new Date();dt.setMonth(dt.getMonth()+Math.ceil(mLeft));
+  return{months:Math.ceil(mLeft),year:dt.getFullYear(),mon:dt.getMonth()+1,rate:(mRate*100).toFixed(1)};
+}
+
+// ── CORS 프록시 목록
 var PROXIES=[
   function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u);},
   function(u){return "https://corsproxy.io/?url="+encodeURIComponent(u);},
   function(u){return "https://thingproxy.freeboard.io/fetch/"+u;},
 ];
-async function fetchOne(sym){
-  var url="https://stooq.com/q/l/?s="+sym+"&f=sd2t2ohlcv&h&e=csv";
+
+// ── Yahoo Finance (키 불필요) - 단일 티커 현재가
+async function yahooQuote(ticker){
+  var url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(ticker)+"?interval=1d&range=5d";
   for(var i=0;i<PROXIES.length;i++){
     try{
-      var r=await fetch(PROXIES[i](url));
-      if(!r.ok)continue;
-      var t=await r.text();
-      var rows=t.trim().split("\n");
-      if(rows[1]){
-        var c=rows[1].split(",");
-        var close=parseFloat(c[6]);
-        if(close>0&&!isNaN(close))return close;
-      }
+      var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
+      var d=await r.json();
+      var meta=d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].meta;
+      if(meta&&meta.regularMarketPrice>0)return meta.regularMarketPrice;
     }catch(e){}
   }
   return 0;
 }
-async function fetchStooq(){
-  var out={};
-  var price=await fetchOne("tqqq.us");
-  if(price>0)out.price=price;
-  var ndx=await fetchOne("^ndx");
-  if(ndx>0)out.ndx=ndx;
-  var fx=await fetchOne("usdkrw");
-  if(fx>0)out.fx=fx;
-  return out;
+
+// ── Yahoo Finance - NDX 역대 최고가 (전체 역사 데이터에서 자동 계산)
+async function yahooNdxPeak(){
+  var url="https://query1.finance.yahoo.com/v8/finance/chart/%5ENDX?range=max&interval=1mo";
+  for(var i=0;i<PROXIES.length;i++){
+    try{
+      var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
+      var d=await r.json();
+      var closes=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].close)||[];
+      var highs=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].high)||[];
+      var all=closes.concat(highs).filter(v=>v&&v>0);
+      var peak=all.length?Math.max(...all):0;
+      if(peak>0)return peak;
+    }catch(e){}
+  }
+  return 0;
 }
 
-// ── 통합 무료 조회: Finnhub(키있으면) + Stooq로 NDX 보완
+// ── 통합 무료 조회: Yahoo Finance 기반 (키 불필요)
 async function fetchFree(finnKey){
   var out={};
-  if(finnKey){
-    var f=await fetchFinnhub(finnKey);
-    if(f.price>0)out.price=f.price;
-    if(f.fx>0)out.fx=f.fx;
+  // Yahoo Finance로 병렬 조회
+  var [price,ndx,fx]=await Promise.allSettled([
+    yahooQuote("TQQQ"),
+    yahooQuote("%5ENDX"),
+    yahooQuote("KRW=X"),  // USD per KRW → 역수 필요
+  ]);
+  if(price.status==="fulfilled"&&price.value>0)out.price=price.value;
+  if(ndx.status==="fulfilled"&&ndx.value>0)out.ndx=ndx.value;
+  // KRW=X 는 1 USD = ? KRW 가 아니라 1 KRW = ? USD 이므로 역수
+  if(fx.status==="fulfilled"&&fx.value>0)out.fx=Math.round(1/fx.value);
+
+  // Finnhub 키 있으면 보완 (더 안정적)
+  if(finnKey&&(!out.price||!out.fx)){
+    try{
+      if(!out.price){var r=await fetch("https://finnhub.io/api/v1/quote?symbol=TQQQ&token="+finnKey);var dF=await r.json();if(dF.c>0)out.price=dF.c;}
+      if(!out.fx){var r2=await fetch("https://finnhub.io/api/v1/quote?symbol=OANDA:USD_KRW&token="+finnKey);var dF2=await r2.json();if(dF2.c>0)out.fx=dF2.c;}
+    }catch(e){}
   }
-  // NDX는 항상 Stooq, 그리고 빠진 값 보완
-  var needNdx=true, needPrice=!out.price, needFx=!out.fx;
-  var ndx=await fetchOne("^ndx");
-  if(ndx>0)out.ndx=ndx;
-  if(needPrice){var p=await fetchOne("tqqq.us");if(p>0)out.price=p;}
-  if(needFx){var x=await fetchOne("usdkrw");if(x>0)out.fx=x;}
   return out;
 }
 
-// ── Anthropic API (키 있을 때, 시세+고점+뉴스)
+// ── NDX 역대 최고치 자동 갱신
+async function fetchNdxPeak(){
+  var peak=await yahooNdxPeak();
+  return peak;
+}
+
+// ── Anthropic
 async function fetchAnthropic(key,wantNews){
-  var content = wantNews
-    ? "오늘 미국 증시를 검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율 (5)오늘 핵심뉴스 3개(시황/빅테크/거시 섞어서 각 한문장). JSON만 출력: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num,\"news\":[{\"cat\":\"시황|빅테크|거시\",\"text\":\"...\"}]}"
-    : "검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율. JSON만: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num}";
+  var content=wantNews
+    ?"오늘 미국 증시를 검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율 (5)오늘 핵심뉴스 3개(시황/빅테크/거시 섞어서 각 한문장). JSON만 출력: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num,\"news\":[{\"cat\":\"시황|빅테크|거시\",\"text\":\"...\"}]}"
+    :"검색해서: (1)TQQQ 현재가 USD (2)NASDAQ-100 NDX 현재값 (3)NDX 역대최고치 (4)USD/KRW 환율. JSON만: {\"price\":num,\"ndx\":num,\"ndxPeak\":num,\"fx\":num}";
   var res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
@@ -176,12 +216,56 @@ async function fetchAnthropic(key,wantNews){
   return JSON.parse(m[0]);
 }
 
-// ── UI
+// ── UI 공통
 var inpStyle={background:C.card2,border:"1px solid "+C.line2,borderRadius:14,padding:"15px 16px",color:C.t,fontFamily:"monospace",fontSize:17,width:"100%",outline:"none",boxSizing:"border-box",WebkitAppearance:"none",fontWeight:600};
 function TInput(p){return(<div>{p.label?<div style={{fontSize:12,color:C.t3,marginBottom:8,fontWeight:500}}>{p.label}</div>:null}<input type={p.type||"text"} inputMode={p.type==="password"?"text":"decimal"} value={p.value} onChange={p.onChange} placeholder={p.placeholder||""} style={inpStyle}/></div>);}
 function Btn(p){var bg=p.disabled?C.card3:p.bg;return(<button onClick={p.onClick} disabled={!!p.disabled} style={{width:"100%",background:bg,color:p.disabled?C.t3:(p.fg||"#0b0e14"),border:"none",borderRadius:16,padding:p.small?"13px 0":"17px 0",fontWeight:700,fontSize:p.small?14:16,cursor:p.disabled?"default":"pointer",letterSpacing:"-0.01em",boxShadow:p.disabled?"none":"0 2px 12px rgba(0,0,0,.25)"}}>{p.label}</button>);}
 function Card(p){return(<div style={{background:C.card,borderRadius:22,padding:p.pad||20,marginBottom:14,boxShadow:"0 1px 3px rgba(0,0,0,.3)",border:"1px solid "+C.line}}>{p.children}</div>);}
 function Label(p){return <div style={{fontSize:13,color:C.t3,fontWeight:600,marginBottom:p.mb!=null?p.mb:16}}>{p.children}</div>;}
+
+// ── 자산 성장 차트 (SVG)
+function AssetChart({s}){
+  var sorted=s.logs.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  var cumShares=s.initShares||0, cumInvested=s.initCapital||0;
+  var pts=[];
+  for(var l of sorted){
+    if(l.bought){cumShares+=(l.shares||0);cumInvested+=(l.buyAmt||0);}
+    if(l.price>0)pts.push({date:l.date,krw:cumShares*l.price*(l.fx||1300),inv:cumInvested});
+  }
+  if(pts.length<2)return <div style={{textAlign:"center",padding:"20px 0",color:C.t3,fontSize:13}}>데이터가 쌓이면 차트가 나타나요</div>;
+  var data=pts.slice(-120);
+  var n=data.length;
+  var W=360,H=150,PL=54,PR=10,PT=10,PB=28;
+  var cw=W-PL-PR,ch=H-PT-PB;
+  var maxV=Math.max(...data.map(p=>p.krw));
+  var minV=Math.min(...data.map(p=>Math.min(p.krw,p.inv)));
+  var range=maxV-minV||1;
+  function px(i){return PL+(i/(n-1))*cw;}
+  function py(v){return H-PB-((v-minV)/range)*ch;}
+  var krwPath=data.map((p,i)=>(i===0?"M":"L")+px(i).toFixed(1)+","+py(p.krw).toFixed(1)).join(" ");
+  var invPath=data.map((p,i)=>(i===0?"M":"L")+px(i).toFixed(1)+","+py(p.inv).toFixed(1)).join(" ");
+  // Y labels
+  var yVals=[minV,(minV+maxV)/2,maxV];
+  // X labels: first, mid, last date
+  var xLabels=[[0,data[0].date.slice(5)],[Math.floor((n-1)/2),data[Math.floor((n-1)/2)].date.slice(5)],[n-1,data[n-1].date.slice(5)]];
+  return(
+    <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}>
+      {yVals.map((v,i)=>(
+        <g key={i}>
+          <line x1={PL} y1={py(v).toFixed(1)} x2={W-PR} y2={py(v).toFixed(1)} stroke={C.line} strokeDasharray="3,3"/>
+          <text x={PL-4} y={(py(v)+4).toFixed(1)} textAnchor="end" fontSize="9" fill={C.t3}>{won(v)}</text>
+        </g>
+      ))}
+      {xLabels.map(([i,lbl])=>(
+        <text key={i} x={px(i).toFixed(1)} y={H-2} textAnchor="middle" fontSize="9" fill={C.t3}>{lbl}</text>
+      ))}
+      <path d={invPath} fill="none" stroke={C.blue} strokeWidth="1.5" opacity="0.6"/>
+      <path d={krwPath} fill="none" stroke={C.green} strokeWidth="2"/>
+      <circle cx={px(n-1).toFixed(1)} cy={py(data[n-1].krw).toFixed(1)} r="4" fill={C.green}/>
+      <circle cx={px(n-1).toFixed(1)} cy={py(data[n-1].inv).toFixed(1)} r="3" fill={C.blue} opacity="0.8"/>
+    </svg>
+  );
+}
 
 // ═══════ 홈 ═══════
 function HomeTab(p){
@@ -192,6 +276,7 @@ function HomeTab(p){
   var [msg,setMsg]=useState("");
   var [busy,setBusy]=useState(false);
   var [newsBusy,setNewsBusy]=useState(false);
+  var autoFetched=useRef(false);
 
   var td=toDay();
   var todayLog=s.logs.find(l=>l.date===td);
@@ -215,28 +300,56 @@ function HomeTab(p){
   var buyShares=(useP>0&&useF>0)?buyAmt/(useP*useF):0;
   var quote=todayQuote();
 
+  // 시세 자동반영: 오늘 기록 없을 때 로드 시 자동 조회 (키 없어도 동작)
+  useEffect(function(){
+    if(autoFetched.current)return;
+    if(todayLog&&todayLog.price>0)return;
+    autoFetched.current=true;
+    (async()=>{
+      setMsg("자동 시세 조회 중...");setBusy(true);
+      try{
+        var data=apiKey?await fetchAnthropic(apiKey,false):await fetchFree(finnKey);
+        if(data.price>0)setPrice(String(Number(data.price).toFixed(2)));
+        if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
+        if(data.fx>0)setFx(String(Math.round(data.fx)));
+        var got=[];if(data.price>0)got.push("TQQQ");if(data.ndx>0)got.push("NDX");if(data.fx>0)got.push("환율");
+        // NDX 역대 최고치 자동 갱신
+        if(!apiKey){
+          var peak=await fetchNdxPeak();
+          if(peak>0&&peak>(s.ndxPeak||0)){await onSave(Object.assign({},s,{ndxPeak:Math.round(peak)}));}
+        } else if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
+          await onSave(Object.assign({},s,{ndxPeak:Math.round(data.ndxPeak)}));
+        }
+        setMsg("✓ 자동조회: "+got.join("/"));
+      }catch(e){setMsg("");}
+      setBusy(false);
+    })();
+  },[]);
+
   async function fetchPrice(){
-    setBusy(true);setMsg(apiKey?"AI 시세 조회 중...":(finnKey?"Finnhub 시세 조회 중...":"무료 시세 조회 중..."));
+    setBusy(true);setMsg(apiKey?"AI 시세 조회 중...":"Yahoo Finance 조회 중...");
     try{
-      var data;
-      if(apiKey){
-        data=await fetchAnthropic(apiKey,false);
-      }else{
-        data=await fetchFree(finnKey);
-        if(!data.price&&!data.ndx&&!data.fx)throw new Error("시세 서버 응답 없음 - 잠시 후 재시도하거나 직접 입력");
-      }
+      var data=apiKey?await fetchAnthropic(apiKey,false):await fetchFree(finnKey);
+      if(!data.price&&!data.ndx&&!data.fx)throw new Error("시세 서버 응답 없음 - 잠시 후 재시도");
       if(data.price>0)setPrice(String(Number(data.price).toFixed(2)));
       if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
       if(data.fx>0)setFx(String(Math.round(data.fx)));
-      if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
+      // NDX 역대 최고치 자동 갱신
+      var peakUpdated=false;
+      if(!apiKey){
+        setMsg("NDX 고점 갱신 중...");
+        var peak=await fetchNdxPeak();
+        if(peak>0&&peak>(s.ndxPeak||0)){
+          await onSave(Object.assign({},s,{ndxPeak:Math.round(peak)}));
+          peakUpdated=true;setMsg("✓ NDX고점 자동 갱신: "+Math.round(peak).toLocaleString());
+        }
+      } else if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
         await onSave(Object.assign({},s,{ndxPeak:Math.round(data.ndxPeak)}));
-        setMsg("✓ 완료 · NDX고점 "+Math.round(data.ndxPeak).toLocaleString());
-      }else{
-        var got=[];
-        if(data.price>0)got.push("TQQQ");
-        if(data.ndx>0)got.push("NDX");
-        if(data.fx>0)got.push("환율");
-        setMsg("✓ 조회: "+got.join("/")+(apiKey?"":" (고점은 자동/수동)"));
+        peakUpdated=true;setMsg("✓ NDX고점: "+Math.round(data.ndxPeak).toLocaleString());
+      }
+      if(!peakUpdated){
+        var got=[];if(data.price>0)got.push("TQQQ $"+Number(data.price).toFixed(2));if(data.ndx>0)got.push("NDX");if(data.fx>0)got.push("환율");
+        setMsg("✓ "+got.join(" · "));
       }
     }catch(e){setMsg(e.message);}
     setBusy(false);
@@ -270,7 +383,7 @@ function HomeTab(p){
   async function doBuy(){
     if(!todayLog){onToast("먼저 종가를 저장해주세요");return;}
     if(todayLog.bought){onToast("이미 매수 완료");return;}
-    var p2=todayLog.price,n2=todayLog.ndx,f2=todayLog.fx;
+    var p2=todayLog.price,f2=todayLog.fx,n2=todayLog.ndx;
     var ns=Object.assign({},s,{logs:s.logs.slice(),triggered:(s.triggered||[]).slice()});
     var peak2=ns.ndxPeak||n2;var mdd2=(n2-peak2)/peak2*100;var ex2=0;
     if(mdd2<=-50)ex2=200000;else if(mdd2<=-40)ex2=150000;else if(mdd2<=-30)ex2=100000;else if(mdd2<=-20)ex2=50000;
@@ -297,6 +410,7 @@ function HomeTab(p){
         <div style={{fontSize:13,color:C.t3,marginTop:8}}>— {quote.a}</div>
       </div>
 
+      {/* 메인 자산 카드 */}
       <div style={{background:"linear-gradient(160deg,"+C.card3+" 0%,"+C.card+" 60%)",borderRadius:26,padding:"26px 22px",marginBottom:14,position:"relative",overflow:"hidden",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
         <div style={{position:"absolute",top:-40,right:-40,width:160,height:160,borderRadius:"50%",background:"radial-gradient(circle,"+C.green+"22,transparent 70%)"}}/>
         <div style={{fontSize:13,color:C.t2,marginBottom:8,fontWeight:500,position:"relative"}}>총 자산 평가액</div>
@@ -309,13 +423,15 @@ function HomeTab(p){
             {D.profit>=0?"▲":"▼"} {won(Math.abs(D.profit))}원 ({D.roi>=0?"+":""}{D.roi.toFixed(1)}%)
           </div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginTop:20,position:"relative"}}>
-          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>{won(D.invested)}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>투입원금</div></div>
-          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.blue}}>{D.invested>0?(D.krw/D.invested).toFixed(2)+"x":"—"}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>수익배수</div></div>
-          <div><div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>{D.totShares.toFixed(1)}</div><div style={{fontSize:11,color:C.t3,marginTop:2}}>보유주식</div></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginTop:20,position:"relative"}}>
+          <div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.t}}>{won(D.invested)}</div><div style={{fontSize:10,color:C.t3,marginTop:2}}>투입원금</div></div>
+          <div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.blue}}>{D.invested>0?(D.krw/D.invested).toFixed(2)+"x":"—"}</div><div style={{fontSize:10,color:C.t3,marginTop:2}}>수익배수</div></div>
+          <div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.t}}>{D.totShares.toFixed(1)}</div><div style={{fontSize:10,color:C.t3,marginTop:2}}>보유주식</div></div>
+          <div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:D.avgPriceUsd>0&&D.price>0?(D.price>=D.avgPriceUsd?C.green:C.coral):C.t}}>{D.avgPriceUsd>0?"$"+D.avgPriceUsd.toFixed(2):"—"}</div><div style={{fontSize:10,color:C.t3,marginTop:2}}>평균단가</div></div>
         </div>
       </div>
 
+      {/* 뉴스 */}
       <Card>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:news?16:0}}>
           <Label mb={0}>📰 오늘의 시장 브리핑</Label>
@@ -329,10 +445,11 @@ function HomeTab(p){
         )):(<div style={{textAlign:"center",padding:"16px 0",color:C.t3,fontSize:13,lineHeight:1.6}}>나스닥 시황 · 빅테크 · 거시경제<br/>핵심 뉴스 요약 (API키 설정 시)</div>)}
       </Card>
 
+      {/* 종가 입력 */}
       <Card>
         <Label>오늘 종가 입력</Label>
         <div style={{marginBottom:msg?10:14}}>
-          <Btn label={busy?"⏳ 조회 중…":(apiKey?"⚡ AI 시세+고점 자동조회":(finnKey?"⚡ Finnhub 시세 조회":"⚡ 무료 시세 조회"))} bg={C.card3} fg={C.blue} onClick={fetchPrice} disabled={busy} small/>
+          <Btn label={busy?"⏳ 조회 중…":(apiKey?"⚡ AI 시세+고점 자동조회":"⚡ Yahoo Finance 시세 조회")} bg={C.card3} fg={C.blue} onClick={fetchPrice} disabled={busy} small/>
         </div>
         {msg?<div style={{fontSize:12,color:msg.startsWith("✓")?C.green:C.gold,textAlign:"center",marginBottom:14,fontFamily:"monospace"}}>{msg}</div>:null}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -343,6 +460,7 @@ function HomeTab(p){
         <Btn label="종가 저장" bg={C.blue} fg="#fff" onClick={saveClose}/>
       </Card>
 
+      {/* 오늘 매수 */}
       <Card>
         <Label>오늘 매수</Label>
         {!todayLog?(<div style={{textAlign:"center",padding:"20px 0",color:C.t3,fontSize:14}}>먼저 종가를 저장해주세요</div>):(
@@ -376,6 +494,7 @@ function HomeTab(p){
         </div>
       </Card>
 
+      {/* NDX 하락 단계 */}
       <Card>
         <Label>NDX 하락 단계 · 추가매수</Label>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16}}>
@@ -433,26 +552,70 @@ function HomeTab(p){
 function LogTab(p){
   var s=p.s;var D=derive(s);var cum=s.initShares||0;
   var rows=s.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(l=>{if(l.bought)cum+=(l.shares||0);return Object.assign({},l,{cum:cum});}).reverse();
+  var monthly=buildMonthly(s);
+
   return (
     <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
       <div style={{padding:"18px 4px 14px"}}>
-        <div style={{fontSize:24,fontWeight:800,color:C.t}}>매수 기록</div>
+        <div style={{fontSize:24,fontWeight:800,color:C.t}}>기록 & 통계</div>
         <div style={{fontFamily:"monospace",fontSize:13,color:C.t3,marginTop:6}}>초기 {(s.initShares||0).toFixed(2)} + 매수 {D.logBuyShares.toFixed(2)} = 총 {D.totShares.toFixed(2)}주</div>
       </div>
-      {rows.length===0?(<Card><div style={{textAlign:"center",padding:"30px 0",color:C.t3}}>아직 기록이 없어요</div></Card>):rows.slice(0,80).map(l=>{
-        var peak=s.ndxPeak||0;var ndxM=peak>0?(l.ndx-peak)/peak*100:0;
-        return(<div key={l.date} style={{display:"flex",alignItems:"center",gap:14,padding:"16px 18px",background:C.card,borderRadius:18,marginBottom:10,border:"1px solid "+C.line,opacity:l.bought?1:0.6}}>
-          <div style={{textAlign:"center",minWidth:42}}>
-            <div style={{fontFamily:"monospace",fontSize:16,fontWeight:700,color:C.t}}>{l.date.slice(8,10)}</div>
-            <div style={{fontSize:10,color:C.t3}}>{l.date.slice(5,7)}월</div>
+
+      {/* 자산 성장 차트 */}
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <Label mb={0}>자산 성장 추이</Label>
+          <div style={{display:"flex",gap:12,fontSize:11,color:C.t3}}>
+            <span style={{color:C.green}}>● 평가액</span>
+            <span style={{color:C.blue}}>● 투입원금</span>
           </div>
-          <div style={{flex:1}}>
-            <div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>${l.price?l.price.toFixed(2):"-"} {l.bought?<span style={{color:C.green}}>+{(l.shares||0).toFixed(3)}주</span>:<span style={{color:C.t3,fontSize:12,fontWeight:400}}>종가만 기록</span>}</div>
-            <div style={{fontSize:12,color:ndxM<=-20?C.coral:C.t3,marginTop:3}}>{l.bought?"누적 "+l.cum.toFixed(2)+"주 · "+won(l.cum*l.price*l.fx)+"원":"미매수"}{peak>0?" · NDX "+ndxM.toFixed(1)+"%":""}</div>
-          </div>
-          {l.extra>0?<div style={{fontSize:10,fontWeight:700,color:C.coral,background:"rgba(255,94,108,.12)",padding:"4px 8px",borderRadius:8}}>MDD</div>:null}
-        </div>);
-      })}
+        </div>
+        <AssetChart s={s}/>
+      </Card>
+
+      {/* 월별 통계 */}
+      {monthly.length>0?(
+        <Card>
+          <Label>월별 통계</Label>
+          {monthly.slice(0,12).map((m,i)=>(
+            <div key={m.mon} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderTop:i>0?"1px solid "+C.line:"none"}}>
+              <div style={{minWidth:42,textAlign:"center"}}>
+                <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.t}}>{m.mon.slice(5)}월</div>
+                <div style={{fontSize:10,color:C.t3}}>{m.mon.slice(0,4)}</div>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.green}}>{won(m.endKrw)}원</span>
+                  <span style={{fontSize:12,color:C.t3}}>{m.days}일 매수</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:12,color:C.t2}}>매수 {won(m.amt)}원 · {m.shares.toFixed(2)}주</span>
+                  {m.endPrice>0?<span style={{fontFamily:"monospace",fontSize:11,color:C.t3}}>${m.endPrice.toFixed(2)}</span>:null}
+                </div>
+              </div>
+            </div>
+          ))}
+        </Card>
+      ):null}
+
+      {/* 상세 기록 */}
+      <Card pad="14px 14px 6px">
+        <Label mb={12}>매수 상세 기록</Label>
+        {rows.length===0?(<div style={{textAlign:"center",padding:"30px 0",color:C.t3}}>아직 기록이 없어요</div>):rows.slice(0,80).map(l=>{
+          var peak=s.ndxPeak||0;var ndxM=peak>0?(l.ndx-peak)/peak*100:0;
+          return(<div key={l.date} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 4px",borderBottom:"1px solid "+C.line,opacity:l.bought?1:0.55}}>
+            <div style={{textAlign:"center",minWidth:36}}>
+              <div style={{fontFamily:"monospace",fontSize:15,fontWeight:700,color:C.t}}>{l.date.slice(8,10)}</div>
+              <div style={{fontSize:10,color:C.t3}}>{l.date.slice(5,7)}월</div>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.t}}>${l.price?l.price.toFixed(2):"-"} {l.bought?<span style={{color:C.green}}>+{(l.shares||0).toFixed(3)}주</span>:<span style={{color:C.t3,fontSize:12,fontWeight:400}}>종가만</span>}</div>
+              <div style={{fontSize:11,color:ndxM<=-20?C.coral:C.t3,marginTop:2}}>{l.bought?"누적 "+l.cum.toFixed(2)+"주 · "+won(l.cum*l.price*l.fx)+"원":"미매수"}{peak>0?" · NDX "+ndxM.toFixed(1)+"%":""}</div>
+            </div>
+            {l.extra>0?<div style={{fontSize:10,fontWeight:700,color:C.coral,background:"rgba(255,94,108,.12)",padding:"3px 7px",borderRadius:7}}>MDD</div>:null}
+          </div>);
+        })}
+      </Card>
     </div>
   );
 }
@@ -463,12 +626,17 @@ function GoalTab(p){
   var goalPct=Math.min(bil/45*100,100);var next=MS.find(m=>m.v>bil);
   var nextIdx=MS.indexOf(next);var prevV=nextIdx>0?MS[nextIdx-1].v:0;
   var segPct=next?Math.min((bil-prevV)/(next.v-prevV)*100,100):100;
+  var pred=predictGoal(s,D);
+  var monthly=buildMonthly(s);
+
   return (
     <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
       <div style={{padding:"18px 4px 14px"}}>
         <div style={{fontSize:24,fontWeight:800,color:C.t}}>목표 여정</div>
         <div style={{fontSize:13,color:C.t3,marginTop:6}}>21년, 45억을 향한 길</div>
       </div>
+
+      {/* 메인 진행 */}
       <div style={{background:"linear-gradient(160deg,"+C.card3+","+C.card+")",borderRadius:26,padding:"28px 22px",marginBottom:14,textAlign:"center",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
         <div style={{fontSize:13,color:C.t2,marginBottom:10}}>45억 목표까지</div>
         <div style={{fontFamily:"monospace",fontSize:48,fontWeight:800,color:C.green,lineHeight:1}}>{goalPct.toFixed(1)}<span style={{fontSize:26}}>%</span></div>
@@ -477,6 +645,34 @@ function GoalTab(p){
         </div>
         <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.t3}}><span>현재 {won(D.krw)}원</span><span>목표 45억</span></div>
       </div>
+
+      {/* 목표 달성 예측 */}
+      {pred?(
+        <div style={{background:"linear-gradient(135deg,rgba(167,139,255,.12),rgba(167,139,255,.04))",border:"1px solid rgba(167,139,255,.3)",borderRadius:20,padding:20,marginBottom:14}}>
+          <div style={{fontSize:13,fontWeight:700,color:C.purple,marginBottom:10}}>🔮 목표 달성 예측</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,textAlign:"center"}}>
+            <div>
+              <div style={{fontFamily:"monospace",fontSize:20,fontWeight:800,color:C.t}}>{pred.year}</div>
+              <div style={{fontSize:11,color:C.t3,marginTop:2}}>예상 달성 연도</div>
+            </div>
+            <div>
+              <div style={{fontFamily:"monospace",fontSize:20,fontWeight:800,color:C.t}}>{pred.months}개월</div>
+              <div style={{fontSize:11,color:C.t3,marginTop:2}}>남은 기간</div>
+            </div>
+            <div>
+              <div style={{fontFamily:"monospace",fontSize:20,fontWeight:800,color:C.purple}}>+{pred.rate}%</div>
+              <div style={{fontSize:11,color:C.t3,marginTop:2}}>월 성장률(3M)</div>
+            </div>
+          </div>
+          <div style={{fontSize:11,color:C.t3,marginTop:12,textAlign:"center"}}>최근 3개월 성장률 기반 추정 · 실제와 다를 수 있음</div>
+        </div>
+      ):(
+        <div style={{background:C.card,border:"1px solid "+C.line,borderRadius:20,padding:18,marginBottom:14,textAlign:"center"}}>
+          <div style={{fontSize:13,color:C.t3}}>🔮 최소 2개월 데이터가 쌓이면 예측이 시작돼요</div>
+        </div>
+      )}
+
+      {/* 다음 관문 */}
       {next?(
         <Card>
           <Label mb={14}>다음 관문</Label>
@@ -494,6 +690,7 @@ function GoalTab(p){
           </div>
         </Card>
       ):null}
+
       <Card>
         <Label mb={6}>마일스톤 여정</Label>
         <div style={{position:"relative",paddingLeft:8}}>
@@ -514,6 +711,7 @@ function GoalTab(p){
           })}
         </div>
       </Card>
+
       <Card>
         <Label>스위칭 전략</Label>
         {swRow?(
@@ -560,6 +758,8 @@ function CfgTab(p){
   var [triggered,setTriggered]=useState((s.triggered||[]).join(","));
   var [keyInput,setKeyInput]=useState(apiKey);
   var [finnInput,setFinnInput]=useState(finnKey);
+  var fileRef=useRef(null);
+
   useEffect(function(){
     setDaily(String(s.daily||50000));setInitShares(String(s.initShares||0));
     setInitCapital(String(s.initCapital||0));setTriggered((s.triggered||[]).join(","));
@@ -572,22 +772,46 @@ function CfgTab(p){
   function doSaveKey(){setApiKey(keyInput);saveKey(keyInput);onToast(keyInput?"Anthropic 키 저장됨":"Anthropic 키 삭제됨");}
   function doSaveFinn(){setFinnKey(finnInput);saveFinn(finnInput);onToast(finnInput?"Finnhub 키 저장됨":"Finnhub 키 삭제됨");}
 
+  // JSON 백업
+  function doExport(){
+    var blob=new Blob([JSON.stringify(s,null,2)],{type:"application/json"});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement("a");
+    a.href=url;a.download="tqqq-backup-"+toDay()+".json";
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);URL.revokeObjectURL(url);
+    onToast("백업 파일 다운로드됨");
+  }
+  function doImport(e){
+    var file=e.target.files[0];if(!file)return;
+    var reader=new FileReader();
+    reader.onload=async function(ev){
+      try{
+        var data=JSON.parse(ev.target.result);
+        if(!data.logs||!Array.isArray(data.logs))throw new Error("올바른 백업 파일이 아닙니다");
+        await onSave(Object.assign({},BLANK,data,{done:true}));
+        onToast("✓ 데이터 복원 완료 · "+data.logs.length+"건");
+      }catch(ex){onToast("파일 오류: "+ex.message);}
+    };
+    reader.readAsText(file);
+    e.target.value="";
+  }
+
   return (
     <div style={{padding:"8px 16px 100px",maxWidth:500,margin:"0 auto"}}>
       <div style={{padding:"18px 4px 14px"}}><div style={{fontSize:24,fontWeight:800,color:C.t}}>설정</div></div>
 
       <Card>
-        <Label>📈 Finnhub 시세 키 (무료 추천)</Label>
+        <Label>📈 Finnhub 키 (선택 · 보조용)</Label>
         <div style={{fontSize:12,color:C.t3,lineHeight:1.7,marginBottom:14}}>
-          finnhub.io에서 <b style={{color:C.t2}}>이메일만으로 무료</b> 발급(결제X).<br/>
-          넣으면 TQQQ·환율 실시간 조회가 안정적이에요.<br/>
-          NDX 지수는 자동으로 보완 조회됩니다.
+          기본 시세는 <b style={{color:C.green}}>키 없이도</b> Yahoo Finance로 자동 조회돼요.<br/>
+          Finnhub 키(finnhub.io 무료)를 넣으면 Yahoo 조회 실패 시 백업으로 사용됩니다.
         </div>
         <div style={{marginBottom:12}}>
-          <TInput label="Finnhub API Key" type="password" value={finnInput} onChange={e=>setFinnInput(e.target.value)} placeholder="키 붙여넣기"/>
+          <TInput label="Finnhub API Key (선택)" type="password" value={finnInput} onChange={e=>setFinnInput(e.target.value)} placeholder="선택사항 · 없어도 됩니다"/>
         </div>
-        <Btn label={finnKey?"Finnhub 키 업데이트":"Finnhub 키 저장"} bg={C.card3} fg={C.green} onClick={doSaveFinn} small/>
-        <div style={{fontSize:12,color:finnKey?C.green:C.t3,marginTop:10,fontFamily:"monospace",textAlign:"center"}}>{finnKey?"✓ Finnhub 설정됨":"미설정 (Stooq 폴백 사용)"}</div>
+        <Btn label={finnKey?"Finnhub 키 업데이트":"Finnhub 키 저장 (선택)"} bg={C.card3} fg={C.green} onClick={doSaveFinn} small/>
+        <div style={{fontSize:12,color:finnKey?C.green:C.t3,marginTop:10,fontFamily:"monospace",textAlign:"center"}}>{finnKey?"✓ Finnhub 백업 설정됨":"미설정 (Yahoo Finance 기본 사용)"}</div>
       </Card>
 
       <Card>
@@ -619,11 +843,13 @@ function CfgTab(p){
         <div style={{background:C.card2,borderRadius:16,padding:16,marginBottom:16,fontFamily:"monospace",fontSize:13,color:C.t2,lineHeight:1.9}}>
           <div style={{display:"flex",justifyContent:"space-between"}}><span>총 보유</span><span style={{color:C.green}}>{D.totShares.toFixed(3)}주</span></div>
           <div style={{display:"flex",justifyContent:"space-between"}}><span>총 투입원금</span><span style={{color:C.green}}>{won(D.invested)}원</span></div>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span>평균단가</span><span style={{color:C.gold}}>{D.avgPriceUsd>0?"$"+D.avgPriceUsd.toFixed(2)+" / "+won(D.avgPriceKrw)+"원":"—"}</span></div>
           <div style={{display:"flex",justifyContent:"space-between"}}><span>평가액</span><span style={{color:C.green}}>{won(D.krw)}원</span></div>
         </div>
         <Btn label="설정 저장" bg={C.blue} fg="#fff" onClick={doSave}/>
       </Card>
 
+      {/* 데이터 관리 */}
       <Card>
         <Label mb={12}>데이터 관리</Label>
         <div style={{background:C.card2,borderRadius:14,padding:"12px 16px",marginBottom:14,fontSize:12,color:C.t2,fontFamily:"monospace",lineHeight:1.7}}>
@@ -631,6 +857,12 @@ function CfgTab(p){
           기록 수: <span style={{color:C.t}}>{s.logs.length}건</span><br/>
           저장 방식: <span style={{color:C.green}}>localStorage (영구)</span>
         </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+          <Btn label="📥 JSON 백업" bg={C.card3} fg={C.green} onClick={doExport} small/>
+          <Btn label="📤 JSON 복원" bg={C.card3} fg={C.blue} onClick={()=>fileRef.current&&fileRef.current.click()} small/>
+        </div>
+        <input ref={fileRef} type="file" accept=".json" onChange={doImport} style={{display:"none"}}/>
+        <div style={{fontSize:11,color:C.t3,textAlign:"center",marginBottom:14,lineHeight:1.5}}>백업 파일로 다른 기기에 이전하거나 안전하게 보관하세요</div>
         <Btn label="전체 초기화" bg={C.card3} fg={C.coral} onClick={onReset} small/>
       </Card>
     </div>
@@ -680,14 +912,19 @@ function App(){
     var ok=persist(withTime);
     if(!ok)onToast("⚠️ 저장 실패 - 저장공간 확인");
   }
-  function onToast(m){setToast(m);setTimeout(()=>setToast(""),2000);}
+  function onToast(m){setToast(m);setTimeout(()=>setToast(""),2500);}
   function onReset(){try{localStorage.removeItem(SK);}catch(e){}setS(Object.assign({},BLANK));}
 
   if(!ready)return <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.t3,fontFamily:"monospace"}}>로딩중…</div>;
   if(!s.done)return <Onboard onDone={d=>{onSave(Object.assign({},BLANK,d,{done:true,logs:[]}));}}/>;
 
   var TABS=[["home","홈"],["log","기록"],["goal","목표"],["cfg","설정"]];
-  var ICONS={home:"M3 10.5L12 3l9 7.5M5 9.5V20h14V9.5",log:"M4 6h16M4 12h16M4 18h10",goal:"M12 2a10 10 0 100 20 10 10 0 000-20zm0 5v5l3 3",cfg:"M12 8a4 4 0 100 8 4 4 0 000-8zm8 4l2-1-2-4-2 1a7 7 0 00-2-1V4h-4v2a7 7 0 00-2 1L8 6 6 10l2 1v2l-2 1 2 4 2-1a7 7 0 002 1v2h4v-2a7 7 0 002-1l2 1 2-4-2-1z"};
+  var ICONS={
+    home:"M3 10.5L12 3l9 7.5M5 9.5V20h14V9.5",
+    log:"M4 6h16M4 12h16M4 18h10",
+    goal:"M12 2a10 10 0 100 20 10 10 0 000-20zm0 5v5l3 3",
+    cfg:"M12 8a4 4 0 100 8 4 4 0 000-8zm8 4l2-1-2-4-2 1a7 7 0 00-2-1V4h-4v2a7 7 0 00-2 1L8 6 6 10l2 1v2l-2 1 2 4 2-1a7 7 0 002 1v2h4v-2a7 7 0 002-1l2 1 2-4-2-1z"
+  };
 
   return (
     <div style={{background:C.bg,minHeight:"100vh",color:C.t,fontSize:14}}>
