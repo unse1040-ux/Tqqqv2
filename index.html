@@ -129,38 +129,72 @@ function predictGoal(s,D){
   return{months:Math.ceil(mLeft),year:dt.getFullYear(),mon:dt.getMonth()+1,rate:(mRate*100).toFixed(1)};
 }
 
-// ── Finnhub
-async function fetchFinnhub(key){
-  var out={};
-  try{var r=await fetch("https://finnhub.io/api/v1/quote?symbol=TQQQ&token="+key);var d=await r.json();if(d.c>0)out.price=d.c;}catch(e){}
-  try{var r2=await fetch("https://finnhub.io/api/v1/quote?symbol=OANDA:USD_KRW&token="+key);var d2=await r2.json();if(d2.c>0)out.fx=d2.c;}catch(e){}
-  return out;
-}
-
-// ── Stooq
+// ── CORS 프록시 목록
 var PROXIES=[
   function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u);},
   function(u){return "https://corsproxy.io/?url="+encodeURIComponent(u);},
   function(u){return "https://thingproxy.freeboard.io/fetch/"+u;},
 ];
-async function fetchOne(sym){
-  var url="https://stooq.com/q/l/?s="+sym+"&f=sd2t2ohlcv&h&e=csv";
+
+// ── Yahoo Finance (키 불필요) - 단일 티커 현재가
+async function yahooQuote(ticker){
+  var url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(ticker)+"?interval=1d&range=5d";
   for(var i=0;i<PROXIES.length;i++){
     try{
       var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
-      var t=await r.text();var rows=t.trim().split("\n");
-      if(rows[1]){var c=rows[1].split(",");var close=parseFloat(c[6]);if(close>0&&!isNaN(close))return close;}
+      var d=await r.json();
+      var meta=d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].meta;
+      if(meta&&meta.regularMarketPrice>0)return meta.regularMarketPrice;
     }catch(e){}
   }
   return 0;
 }
+
+// ── Yahoo Finance - NDX 역대 최고가 (전체 역사 데이터에서 자동 계산)
+async function yahooNdxPeak(){
+  var url="https://query1.finance.yahoo.com/v8/finance/chart/%5ENDX?range=max&interval=1mo";
+  for(var i=0;i<PROXIES.length;i++){
+    try{
+      var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
+      var d=await r.json();
+      var closes=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].close)||[];
+      var highs=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].high)||[];
+      var all=closes.concat(highs).filter(v=>v&&v>0);
+      var peak=all.length?Math.max(...all):0;
+      if(peak>0)return peak;
+    }catch(e){}
+  }
+  return 0;
+}
+
+// ── 통합 무료 조회: Yahoo Finance 기반 (키 불필요)
 async function fetchFree(finnKey){
   var out={};
-  if(finnKey){var f=await fetchFinnhub(finnKey);if(f.price>0)out.price=f.price;if(f.fx>0)out.fx=f.fx;}
-  var ndx=await fetchOne("^ndx");if(ndx>0)out.ndx=ndx;
-  if(!out.price){var p=await fetchOne("tqqq.us");if(p>0)out.price=p;}
-  if(!out.fx){var x=await fetchOne("usdkrw");if(x>0)out.fx=x;}
+  // Yahoo Finance로 병렬 조회
+  var [price,ndx,fx]=await Promise.allSettled([
+    yahooQuote("TQQQ"),
+    yahooQuote("%5ENDX"),
+    yahooQuote("KRW=X"),  // USD per KRW → 역수 필요
+  ]);
+  if(price.status==="fulfilled"&&price.value>0)out.price=price.value;
+  if(ndx.status==="fulfilled"&&ndx.value>0)out.ndx=ndx.value;
+  // KRW=X 는 1 USD = ? KRW 가 아니라 1 KRW = ? USD 이므로 역수
+  if(fx.status==="fulfilled"&&fx.value>0)out.fx=Math.round(1/fx.value);
+
+  // Finnhub 키 있으면 보완 (더 안정적)
+  if(finnKey&&(!out.price||!out.fx)){
+    try{
+      if(!out.price){var r=await fetch("https://finnhub.io/api/v1/quote?symbol=TQQQ&token="+finnKey);var dF=await r.json();if(dF.c>0)out.price=dF.c;}
+      if(!out.fx){var r2=await fetch("https://finnhub.io/api/v1/quote?symbol=OANDA:USD_KRW&token="+finnKey);var dF2=await r2.json();if(dF2.c>0)out.fx=dF2.c;}
+    }catch(e){}
+  }
   return out;
+}
+
+// ── NDX 역대 최고치 자동 갱신
+async function fetchNdxPeak(){
+  var peak=await yahooNdxPeak();
+  return peak;
 }
 
 // ── Anthropic
@@ -266,11 +300,10 @@ function HomeTab(p){
   var buyShares=(useP>0&&useF>0)?buyAmt/(useP*useF):0;
   var quote=todayQuote();
 
-  // 시세 자동반영: 오늘 기록 없을 때 로드 시 자동 조회
+  // 시세 자동반영: 오늘 기록 없을 때 로드 시 자동 조회 (키 없어도 동작)
   useEffect(function(){
     if(autoFetched.current)return;
     if(todayLog&&todayLog.price>0)return;
-    if(!apiKey&&!finnKey)return;
     autoFetched.current=true;
     (async()=>{
       setMsg("자동 시세 조회 중...");setBusy(true);
@@ -280,7 +313,11 @@ function HomeTab(p){
         if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
         if(data.fx>0)setFx(String(Math.round(data.fx)));
         var got=[];if(data.price>0)got.push("TQQQ");if(data.ndx>0)got.push("NDX");if(data.fx>0)got.push("환율");
-        if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
+        // NDX 역대 최고치 자동 갱신
+        if(!apiKey){
+          var peak=await fetchNdxPeak();
+          if(peak>0&&peak>(s.ndxPeak||0)){await onSave(Object.assign({},s,{ndxPeak:Math.round(peak)}));}
+        } else if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
           await onSave(Object.assign({},s,{ndxPeak:Math.round(data.ndxPeak)}));
         }
         setMsg("✓ 자동조회: "+got.join("/"));
@@ -290,19 +327,29 @@ function HomeTab(p){
   },[]);
 
   async function fetchPrice(){
-    setBusy(true);setMsg(apiKey?"AI 시세 조회 중...":(finnKey?"Finnhub 시세 조회 중...":"무료 시세 조회 중..."));
+    setBusy(true);setMsg(apiKey?"AI 시세 조회 중...":"Yahoo Finance 조회 중...");
     try{
       var data=apiKey?await fetchAnthropic(apiKey,false):await fetchFree(finnKey);
-      if(!data.price&&!data.ndx&&!data.fx)throw new Error("시세 서버 응답 없음");
+      if(!data.price&&!data.ndx&&!data.fx)throw new Error("시세 서버 응답 없음 - 잠시 후 재시도");
       if(data.price>0)setPrice(String(Number(data.price).toFixed(2)));
       if(data.ndx>0)setNdx(String(Math.round(data.ndx)));
       if(data.fx>0)setFx(String(Math.round(data.fx)));
-      if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
+      // NDX 역대 최고치 자동 갱신
+      var peakUpdated=false;
+      if(!apiKey){
+        setMsg("NDX 고점 갱신 중...");
+        var peak=await fetchNdxPeak();
+        if(peak>0&&peak>(s.ndxPeak||0)){
+          await onSave(Object.assign({},s,{ndxPeak:Math.round(peak)}));
+          peakUpdated=true;setMsg("✓ NDX고점 자동 갱신: "+Math.round(peak).toLocaleString());
+        }
+      } else if(data.ndxPeak>0&&data.ndxPeak>(s.ndxPeak||0)){
         await onSave(Object.assign({},s,{ndxPeak:Math.round(data.ndxPeak)}));
-        setMsg("✓ 완료 · NDX고점 "+Math.round(data.ndxPeak).toLocaleString());
-      }else{
-        var got=[];if(data.price>0)got.push("TQQQ");if(data.ndx>0)got.push("NDX");if(data.fx>0)got.push("환율");
-        setMsg("✓ 조회: "+got.join("/")+(!apiKey?" (고점은 자동/수동)":""));
+        peakUpdated=true;setMsg("✓ NDX고점: "+Math.round(data.ndxPeak).toLocaleString());
+      }
+      if(!peakUpdated){
+        var got=[];if(data.price>0)got.push("TQQQ $"+Number(data.price).toFixed(2));if(data.ndx>0)got.push("NDX");if(data.fx>0)got.push("환율");
+        setMsg("✓ "+got.join(" · "));
       }
     }catch(e){setMsg(e.message);}
     setBusy(false);
@@ -402,7 +449,7 @@ function HomeTab(p){
       <Card>
         <Label>오늘 종가 입력</Label>
         <div style={{marginBottom:msg?10:14}}>
-          <Btn label={busy?"⏳ 조회 중…":(apiKey?"⚡ AI 시세+고점 자동조회":(finnKey?"⚡ Finnhub 시세 조회":"⚡ 무료 시세 조회"))} bg={C.card3} fg={C.blue} onClick={fetchPrice} disabled={busy} small/>
+          <Btn label={busy?"⏳ 조회 중…":(apiKey?"⚡ AI 시세+고점 자동조회":"⚡ Yahoo Finance 시세 조회")} bg={C.card3} fg={C.blue} onClick={fetchPrice} disabled={busy} small/>
         </div>
         {msg?<div style={{fontSize:12,color:msg.startsWith("✓")?C.green:C.gold,textAlign:"center",marginBottom:14,fontFamily:"monospace"}}>{msg}</div>:null}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -755,17 +802,16 @@ function CfgTab(p){
       <div style={{padding:"18px 4px 14px"}}><div style={{fontSize:24,fontWeight:800,color:C.t}}>설정</div></div>
 
       <Card>
-        <Label>📈 Finnhub 시세 키 (무료 추천)</Label>
+        <Label>📈 Finnhub 키 (선택 · 보조용)</Label>
         <div style={{fontSize:12,color:C.t3,lineHeight:1.7,marginBottom:14}}>
-          finnhub.io에서 <b style={{color:C.t2}}>이메일만으로 무료</b> 발급(결제X).<br/>
-          넣으면 TQQQ·환율 실시간 조회 + 앱 시작 시 자동조회.<br/>
-          NDX 지수는 자동으로 보완 조회됩니다.
+          기본 시세는 <b style={{color:C.green}}>키 없이도</b> Yahoo Finance로 자동 조회돼요.<br/>
+          Finnhub 키(finnhub.io 무료)를 넣으면 Yahoo 조회 실패 시 백업으로 사용됩니다.
         </div>
         <div style={{marginBottom:12}}>
-          <TInput label="Finnhub API Key" type="password" value={finnInput} onChange={e=>setFinnInput(e.target.value)} placeholder="키 붙여넣기"/>
+          <TInput label="Finnhub API Key (선택)" type="password" value={finnInput} onChange={e=>setFinnInput(e.target.value)} placeholder="선택사항 · 없어도 됩니다"/>
         </div>
-        <Btn label={finnKey?"Finnhub 키 업데이트":"Finnhub 키 저장"} bg={C.card3} fg={C.green} onClick={doSaveFinn} small/>
-        <div style={{fontSize:12,color:finnKey?C.green:C.t3,marginTop:10,fontFamily:"monospace",textAlign:"center"}}>{finnKey?"✓ Finnhub 설정됨 (자동조회 활성)":"미설정 (Stooq 폴백 사용)"}</div>
+        <Btn label={finnKey?"Finnhub 키 업데이트":"Finnhub 키 저장 (선택)"} bg={C.card3} fg={C.green} onClick={doSaveFinn} small/>
+        <div style={{fontSize:12,color:finnKey?C.green:C.t3,marginTop:10,fontFamily:"monospace",textAlign:"center"}}>{finnKey?"✓ Finnhub 백업 설정됨":"미설정 (Yahoo Finance 기본 사용)"}</div>
       </Card>
 
       <Card>
