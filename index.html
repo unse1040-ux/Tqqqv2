@@ -138,6 +138,7 @@ var PROXIES=[
 
 // ── Yahoo Finance (키 불필요) - 단일 티커 현재가
 async function yahooQuote(ticker){
+  // ticker를 그대로 넘기면 encodeURIComponent가 한 번만 인코딩
   var url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(ticker)+"?interval=1d&range=5d";
   for(var i=0;i<PROXIES.length;i++){
     try{
@@ -150,16 +151,54 @@ async function yahooQuote(ticker){
   return 0;
 }
 
+// ── USD/KRW 환율: open.er-api.com (CORS 허용, 키 불필요) + Yahoo 폴백
+async function fetchKRW(){
+  // 1순위: ExchangeRate-API (CORS 열림, 키 불필요)
+  try{
+    var r=await fetch("https://open.er-api.com/v6/latest/USD");
+    if(r.ok){var d=await r.json();if(d.rates&&d.rates.KRW>0)return Math.round(d.rates.KRW);}
+  }catch(e){}
+  // 2순위: Yahoo Finance USDKRW=X (직접 쌍, 역수 불필요)
+  var v=await yahooQuote("USDKRW=X");
+  if(v>100)return Math.round(v);
+  // 3순위: Stooq CSV
+  var url="https://stooq.com/q/l/?s=usdkrw&f=sd2t2ohlcv&h&e=csv";
+  for(var i=0;i<PROXIES.length;i++){
+    try{
+      var r2=await fetch(PROXIES[i](url));if(!r2.ok)continue;
+      var t=await r2.text();var rows=t.trim().split("\n");
+      if(rows[1]){var c=rows[1].split(",");var val=parseFloat(c[6]);if(val>100)return Math.round(val);}
+    }catch(e){}
+  }
+  return 0;
+}
+
+// ── NDX 현재값: Yahoo Finance + Stooq 폴백
+async function fetchNDX(){
+  // Yahoo Finance: ^NDX 티커
+  var v=await yahooQuote("^NDX");
+  if(v>0)return v;
+  // Stooq 폴백
+  var url="https://stooq.com/q/l/?s=%5endx&f=sd2t2ohlcv&h&e=csv";
+  for(var i=0;i<PROXIES.length;i++){
+    try{
+      var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
+      var t=await r.text();var rows=t.trim().split("\n");
+      if(rows[1]){var c=rows[1].split(",");var val=parseFloat(c[6]);if(val>0)return val;}
+    }catch(e){}
+  }
+  return 0;
+}
+
 // ── Yahoo Finance - NDX 역대 최고가 (전체 역사 데이터에서 자동 계산)
 async function yahooNdxPeak(){
-  var url="https://query1.finance.yahoo.com/v8/finance/chart/%5ENDX?range=max&interval=1mo";
+  var url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent("^NDX")+"?range=max&interval=1mo";
   for(var i=0;i<PROXIES.length;i++){
     try{
       var r=await fetch(PROXIES[i](url));if(!r.ok)continue;
       var d=await r.json();
-      var closes=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].close)||[];
-      var highs=(d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0]&&d.chart.result[0].indicators.quote[0].high)||[];
-      var all=closes.concat(highs).filter(v=>v&&v>0);
+      var q=d&&d.chart&&d.chart.result&&d.chart.result[0]&&d.chart.result[0].indicators&&d.chart.result[0].indicators.quote&&d.chart.result[0].indicators.quote[0];
+      var all=((q&&q.close)||[]).concat((q&&q.high)||[]).filter(v=>v&&v>0);
       var peak=all.length?Math.max(...all):0;
       if(peak>0)return peak;
     }catch(e){}
@@ -167,21 +206,20 @@ async function yahooNdxPeak(){
   return 0;
 }
 
-// ── 통합 무료 조회: Yahoo Finance 기반 (키 불필요)
+// ── 통합 무료 조회: 키 불필요
 async function fetchFree(finnKey){
   var out={};
-  // Yahoo Finance로 병렬 조회
+  // 병렬 조회
   var [price,ndx,fx]=await Promise.allSettled([
     yahooQuote("TQQQ"),
-    yahooQuote("%5ENDX"),
-    yahooQuote("KRW=X"),  // USD per KRW → 역수 필요
+    fetchNDX(),
+    fetchKRW(),
   ]);
   if(price.status==="fulfilled"&&price.value>0)out.price=price.value;
   if(ndx.status==="fulfilled"&&ndx.value>0)out.ndx=ndx.value;
-  // KRW=X 는 1 USD = ? KRW 가 아니라 1 KRW = ? USD 이므로 역수
-  if(fx.status==="fulfilled"&&fx.value>0)out.fx=Math.round(1/fx.value);
+  if(fx.status==="fulfilled"&&fx.value>0)out.fx=fx.value;
 
-  // Finnhub 키 있으면 보완 (더 안정적)
+  // Finnhub 키 있으면 실패 항목 보완
   if(finnKey&&(!out.price||!out.fx)){
     try{
       if(!out.price){var r=await fetch("https://finnhub.io/api/v1/quote?symbol=TQQQ&token="+finnKey);var dF=await r.json();if(dF.c>0)out.price=dF.c;}
